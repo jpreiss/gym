@@ -128,6 +128,13 @@ register(
     reward_threshold=900,
 )
 
+register(
+    id='Helicopter2D-v0',
+    entry_point='gym.envs.box2d:Helicopter2DEnv',
+    max_episode_steps=1000,
+    reward_threshold=900,
+)
+
 # Toy Text
 # ----------------------------------------
 
