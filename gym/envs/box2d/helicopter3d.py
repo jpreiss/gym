@@ -15,12 +15,14 @@ Author: James Preiss, University of Southern California
 import math
 import random
 import numpy as np
+import scipy.misc
 import Box2D
 import noise
 
 import gym
 from gym import spaces
 from gym.utils import seeding
+import rendering3d
 
 
 # physical constants
@@ -31,8 +33,8 @@ INERTIA_MOMENT = 0.25 # TODO make sure units are right...
 ARM_LENGTH = 0.25 # meters - distance from center of helicopter to motors
 
 # environment limits
-X_MAX = 500 # meters
-X_MIN = -20 # meters
+X_MAX = 250 # meters
+X_MIN = -270 # meters
 Z_MAX = 20  # meters
 Z_MIN = 0   # meters
 
@@ -61,7 +63,7 @@ ACC_NOISE = 0.078   # meters/sec^2 stddev. from Invensense MPU-9250 datasheet.
 FPS = 30
 DT = 1.0 / FPS
 TERRAIN_NPTS = 2048
-#TERRAIN_Z_RANGE = 10.0
+TERRAIN_Z_RANGE = 10.0
 #TERRAIN_FREQ = 16.0 # higher: more small (high-frequency) bumps
 
 # reward parameters
@@ -79,7 +81,7 @@ def clamp(x, xmin, xmax):
 	return min(max(x, xmin), xmax)
 
 
-class Helicopter2DEnv(gym.Env):
+class Helicopter3DEnv(gym.Env):
 	metadata = {
 		'render.modes': ['human', 'rgb_array'],
 		'video.frames_per_second': FPS
@@ -112,6 +114,7 @@ class Helicopter2DEnv(gym.Env):
 
 		# randomize the terrain
 		self.reset()
+		self.terrain_reuse_count = 0
 
 	def _seed(self, seed=None):
 		self.np_random, seed = seeding.np_random(seed)
@@ -190,12 +193,13 @@ class Helicopter2DEnv(gym.Env):
 		# re-randomize the terrain, re-initialize state
 		self.terrain.randomize(TERRAIN_NPTS, X_MIN, X_MAX, self.np_random)
 		self.terrain_dirty_flag = True
-		z = self.terrain.height(0) + 2.0
-		self.dynamics = Heli2DDynamics([0, z])
+		x0 = X_MIN + 20
+		z = self.terrain.height(x0) + 2.0
+		self.dynamics = Heli2DDynamics([x0, z])
 		self.state = self._sensors()
 		return self.state
 
-	def _render(self, mode='human', close=False):
+	def _render_old(self, mode='human', close=False):
 		if close:
 			if self.viewer is not None:
 				self.viewer.close()
@@ -271,11 +275,80 @@ class Helicopter2DEnv(gym.Env):
 
 		return self.viewer.render(return_rgb_array = mode=='rgb_array')
 
+	def _render(self, mode='human', close=False):
+		if close:
+			if self.viewer is not None:
+				self.viewer.close()
+				self.viewer = None
+			return
+
+		screen_width = 600
+		screen_height = 400
+
+		if self.viewer is None:
+			# set up viewer
+			self.viewer = rendering3d.Viewer(screen_width, screen_height)
+			
+			xyrange = (self.terrain.x[0], self.terrain.x[-1])
+			self.viewer.reset_terrain(self.terrain.terrain2d, xyrange, xyrange)
+
+		# terrain has been re-randomized, update
+		if self.terrain_dirty_flag:
+			xyrange = (self.terrain.x[0], self.terrain.x[-1])
+			self.viewer.reset_terrain(self.terrain.terrain2d, xyrange, xyrange)
+			self.terrain_dirty_flag = False
+
+		# draw quad
+		x, z = self.dynamics.pos
+		y = 0
+
+		upz = np.cos(self.dynamics.th)
+		upx = -np.sin(self.dynamics.th)
+		upy = 0
+
+		CAM_LOOK_DOWN = 0.0 # radians
+		fwdx = np.cos(self.dynamics.th - CAM_LOOK_DOWN)
+		fwdz = np.sin(self.dynamics.th - CAM_LOOK_DOWN)
+
+		pos = (x,y,z)
+		at = (x + fwdx, 0, z + fwdz)
+		up = (upx, upy, upz)
+
+		camfov = 110
+		self.viewer.lookat(pos, at, up, camfov)
+
+		return self.viewer.render(return_rgb_array = mode=='rgb_array')
+
 class Terrain:
 	"""random terrain generation and ray-terrain intersection"""
 
-
 	def randomize(self, N, x0, x1, rng):
+
+		def perlin2d(N):
+			z = np.zeros((N,N))
+			nz = noise.snoise2
+			octaves = 8
+			freq = 256.0
+			xoff = 1000 * rng.rand()
+			yoff = 1000 * rng.rand()
+			for x in range(N):
+				for y in range(N):
+					# TODO make noise function less slow
+					z[y][x] = 3* nz(
+						(x + xoff) / freq,
+						(y + yoff) / freq,
+						octaves, persistence=0.2)
+			return z
+
+		terrain2d = perlin2d(N)
+		zmin = np.min(terrain2d)
+		zmax = np.max(terrain2d)
+		self.terrain2d = (TERRAIN_Z_RANGE / (zmax - zmin)) * (terrain2d - zmin)
+		self.z = self.terrain2d[N/2,:]
+		self.x = np.linspace(x0, x1, N)
+		self._init_box2d()
+
+	def randomize_2d(self, N, x0, x1, rng):
 		# randomize how hilly the terrain is. lower number = softer hills
 		terrain_freq = 10 + 14 * rng.rand()
 		# construct random terrain using frequency domain low-freq noise
@@ -286,13 +359,12 @@ class Terrain:
 		zmin = np.min(z)
 		zmax = np.max(z)
 		self.z = (TERRAIN_Z_RANGE / (zmax - zmin)) * (z - zmin)
-		self.x = np.linspace(x0, x1, N)
 		self._init_box2d()
 
 	# PRECONDITION: self.x and self.z are set
 	def _init_box2d(self):
-		assert(self.x)
-		assert(self.z)
+		assert(self.x is not None)
+		assert(self.z is not None)
 		# construct box2d world for lidar.
 		self.world = Box2D.b2World()
 		verts = zip(self.x, self.z)
