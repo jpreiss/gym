@@ -148,7 +148,7 @@ class Viewer(object):
         glEnable(GL_LIGHT0)
         light_x = self.xrange[0]
         light_z = light_x
-        glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(light_x,0,np.abs(light_z)/3.0,1))
+        glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(100*light_x,0,100*np.abs(light_z)/3.0,1))
 
 
         glEnable(GL_CULL_FACE)
@@ -198,6 +198,9 @@ class Viewer(object):
             vN3[:,1] = np.ravel(y)
             vN3[:,2] = np.ravel(z)
             return vN3
+
+        # TEMP DEBUG
+        assert(xrange == yrange)
 
         nx, ny = z.shape
         N = nx * ny

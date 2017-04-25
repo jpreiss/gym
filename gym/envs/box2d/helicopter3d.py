@@ -34,8 +34,8 @@ ARM_LENGTH = 0.25 # meters - distance from center of helicopter to motors
 
 # environment limits
 X_MAX = 250 # meters
-X_MIN = -270 # meters
-Z_MAX = 20  # meters
+X_MIN = -250 # meters
+Z_MAX = 40  # meters
 Z_MIN = 0   # meters
 
 # dynamic limits
@@ -63,7 +63,7 @@ ACC_NOISE = 0.078   # meters/sec^2 stddev. from Invensense MPU-9250 datasheet.
 FPS = 30
 DT = 1.0 / FPS
 TERRAIN_NPTS = 2048
-TERRAIN_Z_RANGE = 10.0
+TERRAIN_Z_RANGE = Z_MAX / 2.0;
 #TERRAIN_FREQ = 16.0 # higher: more small (high-frequency) bumps
 
 # reward parameters
@@ -114,7 +114,6 @@ class Helicopter3DEnv(gym.Env):
 
 		# randomize the terrain
 		self.reset()
-		self.terrain_reuse_count = 0
 
 	def _seed(self, seed=None):
 		self.np_random, seed = seeding.np_random(seed)
@@ -298,7 +297,6 @@ class Helicopter3DEnv(gym.Env):
 			self.viewer.reset_terrain(self.terrain.terrain2d, xyrange, xyrange)
 			self.terrain_dirty_flag = False
 
-		# draw quad
 		x, z = self.dynamics.pos
 		y = 0
 
@@ -313,6 +311,9 @@ class Helicopter3DEnv(gym.Env):
 		pos = (x,y,z)
 		at = (x + fwdx, 0, z + fwdz)
 		up = (upx, upy, upz)
+
+		dp = upx * fwdx + upz * fwdz
+		assert(dp < 0.0001)
 
 		camfov = 110
 		self.viewer.lookat(pos, at, up, camfov)
