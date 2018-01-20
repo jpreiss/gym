@@ -10,9 +10,9 @@ import gym
 from gym import spaces
 from gym.utils import seeding
 import numpy as np
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
-
 class CartPoleEnvSysID(gym.Env):
     metadata = {
         'render.modes': ['human', 'rgb_array'],
@@ -20,13 +20,25 @@ class CartPoleEnvSysID(gym.Env):
     }
 
     def __init__(self):
+
+        # initialize the system identification parameters.
+        self.sysid_params = OrderedDict([
+            ('masscart',  [[0.5, 2], 0]),
+            ('masspole',  [[0.05, 0.2], 0]),
+            ('length',    [[0.25, 1], 0]),
+            ('force_mag', [[4, 15], 0]),
+        ])
+        # self.masscart = 1.0
+        # self.masspole = 0.1
+        # self.length = 0.5 # actually half the pole's length
+        # self.force_mag = 10.0
+
+        low_sysid = np.array([p[0][0] for p in self.sysid_params.values()])
+        high_sysid = np.array([p[0][1] for p in self.sysid_params.values()])
+        self._seed()
+        self.sample_sysid()
+
         self.gravity = 9.8
-        self.masscart = 1.0
-        self.masspole = 0.1
-        self.total_mass = (self.masspole + self.masscart)
-        self.length = 0.5 # actually half the pole's length
-        self.polemass_length = (self.masspole * self.length)
-        self.force_mag = 10.0
         self.tau = 0.02  # seconds between state updates
 
         # Angle at which to fail the episode
@@ -35,27 +47,36 @@ class CartPoleEnvSysID(gym.Env):
 
         # observe: x, xdot, th, thdot
         # Angle limit set to 2 * theta_threshold_radians so failing observation is still within bounds
-        high = [
+        high = np.array([
             self.x_threshold * 2,
             np.finfo(np.float32).max,
             self.theta_threshold_radians * 2,
-            np.finfo(np.float32).max]
+            np.finfo(np.float32).max])
+        low = np.concatenate([-high, low_sysid])
+        high = np.concatenate([high, high_sysid])
+        self.observation_space = spaces.Box(low, high)
+        self.sysid_dim = len(self.sysid_params)
 
-        #self.action_space = spaces.Discrete(2)
-        action_hi = np.array([1])
-        self.action_space = spaces.Box(-action_hi, action_hi)
+        # act: between -1 and 1, will be scaled by force_mag.
+        # extra push for policy to learn SysID of force_mag.
+        self.action_space = spaces.Box(np.array([-1]), np.array([1]))
 
-        # TODO actual sysid params
-        high_sysid = np.array(high + [1, 1])
-        self.observation_space = spaces.Box(-high_sysid, high_sysid)
-        self.sysid_dim = 2
-
-        self._seed()
         self.viewer = None
-        print("initing viewer")
         self.state = None
-
         self.steps_beyond_done = None
+
+    def sample_sysid(self):
+        for p in self.sysid_params.values():
+            p[1] = self.np_random.uniform(*p[0])
+        self.masscart = self.sysid_params['masscart'][1]
+        self.masspole = self.sysid_params['masspole'][1]
+        self.total_mass = (self.masspole + self.masscart)
+        self.length = self.sysid_params['length'][1]
+        self.polemass_length = (self.masspole * self.length)
+        self.force_mag = self.sysid_params['force_mag'][1]
+
+    def sysid_values(self):
+        return np.array([p[1] for p in self.sysid_params.values()])
 
     def _seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -64,8 +85,8 @@ class CartPoleEnvSysID(gym.Env):
     def _step(self, action):
         assert self.action_space.contains(action), "%r (%s) invalid"%(action, type(action))
         state = self.state
-        x, x_dot, theta, theta_dot, id1, id2 = state
-        force = self.force_mag * action
+        x, x_dot, theta, theta_dot, *_ = state
+        force = self.force_mag * self.total_mass * action
         costheta = math.cos(theta)
         sintheta = math.sin(theta)
         temp = (force + self.polemass_length * theta_dot * theta_dot * sintheta) / self.total_mass
@@ -75,7 +96,7 @@ class CartPoleEnvSysID(gym.Env):
         x_dot = x_dot + self.tau * xacc
         theta = theta + self.tau * theta_dot
         theta_dot = theta_dot + self.tau * thetaacc
-        self.state = (x,x_dot,theta,theta_dot, 0, 0)
+        self.state = np.concatenate([np.array([x, x_dot, theta, theta_dot]), self.sysid_values()])
         done =  x < -self.x_threshold \
                 or x > self.x_threshold \
                 or theta < -self.theta_threshold_radians \
@@ -94,11 +115,13 @@ class CartPoleEnvSysID(gym.Env):
             self.steps_beyond_done += 1
             reward = 0.0
 
-        return np.array(self.state), reward, done, {}
+        return self.state, reward, done, {}
 
     def _reset(self):
-        self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(6,))
-        self.state[-2:] = 0
+        self.state = np.concatenate([
+            self.np_random.uniform(low=-0.05, high=0.05, size=(4)),
+            self.sysid_values()])
+        self.state[2:] = 0
         self.steps_beyond_done = None
         return np.array(self.state)
 
