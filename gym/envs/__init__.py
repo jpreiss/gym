@@ -90,6 +90,17 @@ register(
     max_episode_steps=500,
 )
 
+# Classic - SysID
+# ----------------------------------------
+
+register(
+    id='CartPole-SysID-v0',
+    entry_point='gym.envs.classic_sysid:CartPoleEnvSysID',
+    max_episode_steps=200,
+    reward_threshold=195.0,
+)
+
+
 # Box2d
 # ----------------------------------------
 
