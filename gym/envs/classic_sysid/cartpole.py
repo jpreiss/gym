@@ -23,10 +23,14 @@ class CartPoleEnvSysID(gym.Env):
 
         # initialize the system identification parameters.
         self.sysid_params = OrderedDict([
-            ('masscart',  [[0.5, 2], 0]),
-            ('masspole',  [[0.05, 0.2], 0]),
-            ('length',    [[0.25, 1], 0]),
-            ('force_mag', [[4, 15], 0]),
+            #('masscart',  [[0.5, 2], 0]),
+            #('masspole',  [[0.05, 0.2], 0]),
+            #('length',    [[0.25, 1], 0]),
+            #('force_mag', [[4, 15], 0]),
+            ('masscart',  [[1, 1], 0]),
+            ('masspole',  [[0.1, 0.1], 0]),
+            ('length',    [[0.5, 0.5], 0]),
+            ('force_mag', [[20, 20], 0]),
         ])
         # self.masscart = 1.0
         # self.masspole = 0.1
@@ -42,7 +46,7 @@ class CartPoleEnvSysID(gym.Env):
         self.tau = 0.02  # seconds between state updates
 
         # Angle at which to fail the episode
-        self.theta_threshold_radians = 12 * 2 * math.pi / 360
+        self.theta_threshold_radians = 45 * 2 * math.pi / 360
         self.x_threshold = 2.4
 
         # observe: x, xdot, th, thdot
@@ -76,13 +80,15 @@ class CartPoleEnvSysID(gym.Env):
         self.force_mag = self.sysid_params['force_mag'][1]
 
     def sysid_values(self):
-        return np.array([p[1] for p in self.sysid_params.values()])
+        return 0 * np.array([p[1] for p in self.sysid_params.values()])
 
     def _seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
 
     def _step(self, action):
+        action[action > 1] = 1
+        action[action < -1] = -1
         assert self.action_space.contains(action), "%r (%s) invalid"%(action, type(action))
         state = self.state
         x, x_dot, theta, theta_dot, *_ = state
@@ -104,28 +110,34 @@ class CartPoleEnvSysID(gym.Env):
         done = bool(done)
 
         if not done:
-            reward = 1.0
+            #reward = 1.0 - 0.1 * np.sum(np.abs(self.state[:4]))
+            reward = 1.0 - 0.1*abs(x) - 0.1*abs(theta) - 0.01*abs(x_dot) - 0.01*abs(theta_dot)
+            reward = reward[0]
         elif self.steps_beyond_done is None:
             # Pole just fell!
             self.steps_beyond_done = 0
-            reward = 1.0
+            reward = -1000
         else:
             if self.steps_beyond_done == 0:
                 logger.warning("You are calling 'step()' even though this environment has already returned done = True. You should always call 'reset()' once you receive 'done = True' -- any further steps are undefined behavior.")
             self.steps_beyond_done += 1
             reward = 0.0
 
+        reward = 0.1 * reward
         return self.state, reward, done, {}
 
     def _reset(self):
+        x = self.x_threshold / 115.0
+        t = self.theta_threshold_radians / 110.0
+
         self.state = np.concatenate([
-            self.np_random.uniform(low=-0.05, high=0.05, size=(4)),
+            self.np_random.uniform(low=[-x, -x, -t, -t], high=[x, x, t, t]),
             self.sysid_values()])
-        self.state[2:] = 0
         self.steps_beyond_done = None
         return np.array(self.state)
 
     def _render(self, mode='human', close=False):
+        return
         if close:
             if self.viewer is not None:
                 self.viewer.close()
