@@ -100,6 +100,13 @@ register(
     reward_threshold=195.0,
 )
 
+register(
+    id='CartPole-SysID-Batch-v0',
+    entry_point='gym.envs.classic_sysid:CartPoleEnvSysIDBatch',
+    max_episode_steps=200,
+    reward_threshold=195.0,
+)
+
 
 # Box2d
 # ----------------------------------------
