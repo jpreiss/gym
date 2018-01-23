@@ -23,15 +23,18 @@ class CartPoleEnvSysIDBatch(gym.Env):
         self.N = 32
 
         # initialize the system identification parameters.
+        def expand(x):
+            ratio = 4.0
+            return [x/ratio, x*ratio]
         self.sysid_params = OrderedDict([
-            #('masscart',  [[0.5, 2], 0]),
-            #('masspole',  [[0.05, 0.2], 0]),
-            #('length',    [[0.25, 1], 0]),
-            #('force_mag', [[4, 15], 0]),
-            ('masscart',  [[1, 1], 0]),
-            ('masspole',  [[0.1, 0.1], 0]),
-            ('length',    [[0.5, 0.5], 0]),
-            ('force_mag', [[20, 20], 0]),
+            ('masscart',  [expand(1.0), 0]),
+            ('masspole',  [expand(0.1), 0]),
+            ('length',    [expand(0.5), 0]),
+            ('force_mag', [expand(10.0), 0]),
+            #('masscart',  [[1, 1], 0]),
+            #('masspole',  [[0.1, 0.1], 0]),
+            #('length',    [[0.5, 0.5], 0]),
+            #('force_mag', [[20, 20], 0]),
         ])
         # self.masscart = 1.0
         # self.masspole = 0.1
@@ -140,7 +143,6 @@ class CartPoleEnvSysIDBatch(gym.Env):
         return self.state
 
     def _render(self, mode='human', close=False):
-        return
         if close:
             if self.viewer is not None:
                 self.viewer.close()
