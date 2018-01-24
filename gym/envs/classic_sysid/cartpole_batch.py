@@ -11,6 +11,7 @@ from gym import spaces
 from gym.utils import seeding
 import numpy as np
 from collections import OrderedDict
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 class CartPoleEnvSysIDBatch(gym.Env):
@@ -21,6 +22,7 @@ class CartPoleEnvSysIDBatch(gym.Env):
 
     def __init__(self):
         self.N = 32
+        self.state = np.zeros((self.N, 8))
 
         # initialize the system identification parameters.
         def expand(x):
@@ -43,8 +45,6 @@ class CartPoleEnvSysIDBatch(gym.Env):
 
         low_sysid = np.array([p[0][0] for p in self.sysid_params.values()])
         high_sysid = np.array([p[0][1] for p in self.sysid_params.values()])
-        self._seed()
-        self.sample_sysid()
 
         self.gravity = 9.8
         self.tau = 0.02  # seconds between state updates
@@ -70,10 +70,13 @@ class CartPoleEnvSysIDBatch(gym.Env):
         self.action_space = spaces.Box(np.array([-1]), np.array([1]))
 
         self.viewer = None
-        self.state = None
         self.steps_beyond_done = None
 
+        self._seed()
+        self.sample_sysid()
+
     def sample_sysid(self):
+        print("sampling new sysid")
         for p in self.sysid_params.values():
             p[1] = self.np_random.uniform(p[0][0], p[0][1], (self.N))
         self.masscart = self.sysid_params['masscart'][1]
@@ -82,11 +85,12 @@ class CartPoleEnvSysIDBatch(gym.Env):
         self.length = self.sysid_params['length'][1]
         self.polemass_length = (self.masspole * self.length)
         self.force_mag = self.sysid_params['force_mag'][1]
+        self.state[:,4:] = self.sysid_values()
 
     def sysid_values(self):
         v = np.array([p[1] for p in self.sysid_params.values()]).T
         assert v.shape == (self.N, self.sysid_dim)
-        return 0 * v
+        return v
 
     def _seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -125,8 +129,10 @@ class CartPoleEnvSysIDBatch(gym.Env):
         return self.state, reward, self.done, {}
 
     def reset_done(self):
+        prev_states = deepcopy(self.state)
         new_states = self._sample_reset()
         self.state[self.done,:] = new_states[self.done,:]
+        assert np.all(self.state[:,4:] == prev_states[:,4:])
 
     def _sample_reset(self):
         x = self.x_threshold / 115.0
