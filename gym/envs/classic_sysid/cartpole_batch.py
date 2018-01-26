@@ -23,6 +23,7 @@ class CartPoleEnvSysIDBatch(gym.Env):
     def __init__(self):
         self.N = 32
         self.state = np.zeros((self.N, 8))
+        self.fixedlen = False
 
         # initialize the system identification parameters.
         def expand(x):
@@ -72,6 +73,9 @@ class CartPoleEnvSysIDBatch(gym.Env):
         self.viewer = None
         self.steps_beyond_done = None
 
+        self.ep_len = 20
+        self.tick = 0
+
         self._seed()
         self.sample_sysid()
 
@@ -115,17 +119,33 @@ class CartPoleEnvSysIDBatch(gym.Env):
         x  = x + self.tau * x_dot
         x_dot = x_dot + self.tau * xacc
         theta = theta + self.tau * theta_dot
-        theta_dot = theta_dot + self.tau * thetaacc
+        damping = 0.998 # lose 10% of velocity in one second
+        theta_dot = damping*theta_dot + self.tau * thetaacc
         self.state = np.stack([x, x_dot, theta, theta_dot] + sysid_states, axis=1)
-        self.done = np.logical_or(
-            np.abs(x) > self.x_threshold,
-            np.abs(theta) > self.theta_threshold_radians)
 
-        reward = 1.0 - 0.1*np.abs(x) - 0.1*np.abs(theta) - 0.01*np.abs(x_dot) - 0.01*np.abs(theta_dot)
-        reward[self.done] = -1000
-        reward = 0.1 * reward
-        self.reset_done()
+        if self.fixedlen:
+            loss = np.abs(x) + np.abs(theta) + 0.1*np.abs(x_dot) + 0.1*np.abs(theta_dot)
+            reward = -0.1 * loss
 
+            self.tick += 1
+            self.done = (0 * reward).astype(bool)
+            if self.tick >= self.ep_len:
+                self.done = np.logical_not(self.done)
+                self.reset_done()
+                self.tick = 0
+                self.ep_len *= 1.01
+        else:
+            self.done = np.logical_or(
+                np.abs(x) > self.x_threshold,
+                np.abs(theta) > self.theta_threshold_radians)
+
+            reward = 1.0 - 0.1*np.abs(x) - 0.1*np.abs(theta) - 0.01*np.abs(x_dot) - 0.01*np.abs(theta_dot
+            reward[self.done] = -1000
+            reward = 0.1 * reward
+            self.reset_done()
+
+        # after self.reset_done(), all states that were done
+        # have already been reset to new states
         return self.state, reward, self.done, {}
 
     def reset_done(self):
@@ -149,6 +169,7 @@ class CartPoleEnvSysIDBatch(gym.Env):
         return self.state
 
     def _render(self, mode='human', close=False):
+        #return
         if close:
             if self.viewer is not None:
                 self.viewer.close()
