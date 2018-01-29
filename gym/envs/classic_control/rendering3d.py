@@ -14,6 +14,7 @@ if "Apple" in sys.version:
 
 from gym.utils import reraise
 from gym import error
+import matplotlib.pyplot as plt
 
 try:
     import pyglet
@@ -74,13 +75,14 @@ class Viewer(object):
     def look_at(self, eye, target, up):
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
+        eye, target, up = list(eye), list(target), list(up)
         gluLookAt(*(eye + target + up))
 
     def render(self, return_rgb_array=False):
         self.window.switch_to()
         self.window.dispatch_events()
 
-        glClearColor(0.1,0.1,0.1,1)
+        glClearColor(0,0,0,1)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glViewport(0, 0, self.width, self.height)
         glFrontFace(GL_CCW)
@@ -95,12 +97,12 @@ class Viewer(object):
 
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
-        glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(4.0, 10.0, 6.0, 1))
+        glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(40.0, 100.0, 60.0, 1))
         glLightfv(GL_LIGHT0, GL_AMBIENT, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
         glLightfv(GL_LIGHT0, GL_DIFFUSE, (GLfloat * 4)(0.8, 0.8, 0.8, 1))
         glLightfv(GL_LIGHT0, GL_SPECULAR, (GLfloat * 4)(0.4, 0.4, 0.4, 1))
         glEnable(GL_LIGHT0)
-        glLightfv(GL_LIGHT1, GL_POSITION, (GLfloat * 4)(-20, -4.0, -2.0, 1))
+        glLightfv(GL_LIGHT1, GL_POSITION, (GLfloat * 4)(-200, -40.0, -20.0, 1))
         glLightfv(GL_LIGHT1, GL_AMBIENT, (GLfloat * 4)(0.1, 0.1, 0.1, 1))
         glLightfv(GL_LIGHT1, GL_DIFFUSE, (GLfloat * 4)(0.5, 0.5, 0.5, 1))
         glLightfv(GL_LIGHT1, GL_SPECULAR, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
@@ -143,6 +145,7 @@ def _add_attrs(geom, attrs):
         geom.set_linewidth(attrs["linewidth"])
 
 class Geom(object):
+
     def __init__(self):
         self._color=Color((0, 0, 0, 1.0))
         self.attrs = [self._color]
@@ -158,7 +161,7 @@ class Geom(object):
         self.attrs.append(attr)
     def set_color(self, r, g, b):
         self._color.vec4 = (r, g, b, 1)
-
+        return self
     def set_translate(self, x, y, z):
         translations = [a for a in self.attrs if isinstance(a, Translate)]
         assert len(translations) <= 1
@@ -166,18 +169,20 @@ class Geom(object):
             translations[0].t = (x, y, z)
         else:
             self.translate(x, y, z)
+        return self
+
+    def set_rotation(self, mat):
+        rotations = [i for i, a in enumerate(self.attrs) if isinstance(a, Rotate)]
+        assert len(rotations) <= 1
+        if len(rotations) == 1:
+            i = rotations[0]
+            self.attrs[i] = Rotate(mat)
+        else:
+            self.add_attr(Rotate(mat))
+        return self
 
     def translate(self, x, y, z):
         self.add_attr(Translate(x, y, z))
-        return self
-    def rotx(self, theta):
-        self.add_attr(Rotate.x(theta))
-        return self
-    def roty(self, theta):
-        self.add_attr(Rotate.y(theta))
-        return self
-    def rotz(self, theta):
-        self.add_attr(Rotate.z(theta))
         return self
 
 class Attr(object):
@@ -216,24 +221,57 @@ class Translate(Attr):
         glPopMatrix()
 
 class Rotate(Attr):
-    def __init__(self, angle, axis):
-        self.angle = RAD2DEG * angle
-        self.axis = axis
+    def __init__(self, matrix):
+        m1 = np.vstack([matrix, np.array([0, 0, 0])])
+        matrix = np.hstack([m1, np.array([0, 0, 0, 1])[:,None]])
+        mf = matrix.T.flatten()
+        self.matrix_raw = (GLfloat * 16)(*matrix.T.flatten())
     def enable(self):
         glMatrixMode(GL_MODELVIEW)
         glPushMatrix()
-        glRotatef(angle, *axis)
+        glMultMatrixf(self.matrix_raw)
     def disable(self):
         glPopMatrix()
 
-    def x(theta):
-        return Rotate(theta, (1, 0, 0))
+def _rot2d(theta):
+    c = np.cos(theta)
+    s = np.sin(theta)
+    return np.array([[c, -s], [s, c]])
 
-    def y(theta):
-        return Rotate(theta, (0, 1, 0))
+def rotz(theta):
+    r = np.eye(3)
+    r[:2,:2] = _rot2d(theta)
+    return r
 
-    def z(theta):
-        return Rotate(theta, (0, 0, 1))
+class CheckerTexture(Attr):
+    def __init__(self):
+        pattern = pyglet.image.CheckerImagePattern(
+            color1=(30,30,30,255),
+            color2=(50,50,50,255))
+        # higher res makes nicer mipmaps
+        res = 256
+        self.tex = pattern.create_image(res, res).get_texture()
+        glBindTexture(GL_TEXTURE_2D, self.tex.id)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
+
+        # anisotropic texturing helps a lot with checkerboard floors
+        anisotropy = (GLfloat)()
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
+        print("max anisotropy:", anisotropy)
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
+
+    def enable(self):
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, (GLfloat * 4)(1,1,1,1))
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(1,1,1,1))
+        glEnable(self.tex.target)
+        glBindTexture(self.tex.target, self.tex.id)
+
+    def disable(self):
+        glDisable(self.tex.target)
 
 class Color(Attr):
     def __init__(self, vec4):
@@ -346,14 +384,16 @@ class Line(Geom):
 
 
 
-class Mesh3D(Geom):
-    def __init__(self, verts):
+class Mesh(Geom):
+    def __init__(self, verts, uvs=None):
         if len(verts.shape) != 2 or verts.shape[1] != 3:
             raise ValueError('verts must be an N x 3 NumPy array')
 
         nverts = verts.shape[0]
         assert int(nverts) % 3 == 0
-        ntris = nverts // 3
+
+        if uvs is not None:
+            assert uvs.shape == (nverts, 2)
 
         super().__init__()
 
@@ -366,17 +406,39 @@ class Mesh3D(Geom):
             n = normalize(np.cross(d0, d1))
             normals[i:(i+3),:] = n
 
-        self.vertex_list = pyglet.graphics.vertex_list(
-            nverts,
+        args = [
             ('v3f', list(verts.flatten())),
             ('n3f', list(normals.flatten())),
-        )
+        ]
+        if uvs is not None:
+            args.append(('t2f', list(uvs.flatten())))
+
+        self.vertex_list = pyglet.graphics.vertex_list(nverts, *args)
 
     def render1(self):
         self.vertex_list.draw(GL_TRIANGLES)
 
 
-class Mesh3D_Indexed(Geom):
+class Strip(Geom):
+    def __init__(self, verts, normals):
+        N, k, dim = verts.shape
+        assert k == 2
+        assert dim == 3
+        assert normals.shape == verts.shape
+
+        super().__init__()
+
+        # TODO guess normals
+
+        self.vertex_list = pyglet.graphics.vertex_list(N * 2,
+            ('v3f', list(verts.flatten())),
+            ('n3f', list(normals.flatten())))
+
+    def render1(self):
+        self.vertex_list.draw(GL_TRIANGLE_STRIP)
+
+
+class Mesh_Indexed(Geom):
     def __init__(self, verts, tris):
         if len(verts.shape) != 2 or verts.shape[1] != 3:
             raise ValueError('verts must be an N x 3 NumPy array')
@@ -403,7 +465,7 @@ class Mesh3D_Indexed(Geom):
 
 
 # a box centered on the origin
-class Box(Mesh3D):
+class Box(Mesh):
     def __init__(self, x, y, z):
         vtop = np.array([[x, y, z], [x, -y, z], [-x, -y, z], [-x, y, z]])
         vbottom = deepcopy(vtop)
@@ -417,7 +479,7 @@ class Box(Mesh3D):
 
 
 # cylinder centered on the origin
-class Cylinder(Mesh3D):
+class Cylinder(Mesh):
     def __init__(self, radius, height, sections):
         step = 2 * np.pi / sections;
         theta = step * np.arange(sections)
@@ -459,7 +521,7 @@ class Cylinder(Mesh3D):
         super().__init__(v)
 
 # a cone sitting on xy plane with radius r, height h, n facets
-class Cone(Mesh3D):
+class Cone(Mesh):
     def __init__(self, radius, height, sections):
         n = sections
         r = radius
@@ -486,12 +548,55 @@ class Cone(Mesh3D):
 class Arrow(Compound):
     def __init__(self, radius, height, facets):
         cyl_r = radius
-        cyl_h = 0.75 * height
+        cyl_h = 0.7 * height
         cone_h = height - cyl_h
-        cone_r = 2 * cyl_r
+        cone_half_angle = np.radians(30)
+        cone_r = cone_h * np.tan(cone_half_angle)
         cyl = Cylinder(cyl_r, cyl_h, facets).translate(0,0,cyl_h/2)
         cone = Cone(cone_r, cone_h, facets).translate(0,0,cyl_h)
         super().__init__([cyl, cone])
+
+# square in xy plane centered on origin
+class Rect(Mesh):
+    # dim: (w, h)
+    # urange, vrange: desired min/max (u, v) tex coords
+    def __init__(self, dim, urange=(0,1), vrange=(0,1)):
+        v = np.array([
+            [1, 1, 0], [-1, 1, 0], [1, -1, 0],
+            [-1, 1, 0], [-1, -1, 0], [1, -1, 0]])
+        vtx = np.matmul(v, np.diag([dim[0] / 2.0, dim[1] / 2.0, 0]))
+        u0, u1 = urange
+        v0, v1 = vrange
+        uv = np.array([
+            [u1, v1], [u0, v1], [u1, v0],
+            [u0, v1], [u0, v0], [u1, v0]])
+        super().__init__(vtx, uv)
+
+class Sphere(Strip):
+    def __init__(self, radius, resolution):
+        t = np.linspace(-1, 1, resolution)
+        u, v = np.meshgrid(t, t)
+        vtx = []
+        panel = np.zeros((resolution, resolution, 3))
+        inds = list(range(3))
+        for i in range(3):
+            panel[:,:,inds[0]] = u
+            panel[:,:,inds[1]] = v
+            panel[:,:,inds[2]] = 1
+            norms = np.linalg.norm(panel, axis=2)
+            panel = panel / np.tile(norms[:,:,None], (1, 1, 3))
+            for _ in range(2):
+                for j in range(resolution - 1):
+                    strip = deepcopy(panel[[j,j+1],:,:].transpose([1,0,2]).reshape((-1,3)))
+                    degen0 = deepcopy(strip[0,:])
+                    degen1 = deepcopy(strip[-1,:])
+                    vtx.extend([degen0, strip, degen1])
+                panel *= -1
+            inds = [inds[-1]] + inds[:-1]
+
+        strip = np.vstack(vtx).reshape(-1,2,3)
+        super().__init__(radius * strip, strip)
+
 
 class Image(Geom):
     def __init__(self, fname, width, height):
