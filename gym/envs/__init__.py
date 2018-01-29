@@ -53,8 +53,8 @@ register(
 register(
     id='CartPole-v0',
     entry_point='gym.envs.classic_control:CartPoleEnv',
-    max_episode_steps=200,
-    reward_threshold=195.0,
+    #max_episode_steps=200,
+    #reward_threshold=195.0,
 )
 
 register(
@@ -88,6 +88,11 @@ register(
     id='Acrobot-v1',
     entry_point='gym.envs.classic_control:AcrobotEnv',
     max_episode_steps=500,
+)
+
+register(
+    id='Quadrotor-v0',
+    entry_point='gym.envs.classic_control:QuadrotorEnv',
 )
 
 # Classic - SysID
