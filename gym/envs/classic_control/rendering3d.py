@@ -31,22 +31,11 @@ import numpy as np
 
 RAD2DEG = 57.29577951308232
 
-def npa(*args):
-    return np.array(args)
-
-def normalize(x):
-    if len(x.shape) == 1:
-        return x / np.linalg.norm(x)
-    elif len(x.shape) == 2:
-        return x / np.linalg.norm(x, axis=1)[:,None]
-    else:
-        assert False
-
 def get_display(spec):
     """Convert a display specification (such as :0) into an actual Display
     object.
 
-    Pyglet only supports multiple Displays on Linux.
+    pyglet only supports multiple Displays on Linux.
     """
     if spec is None:
         return None
@@ -58,30 +47,28 @@ def get_display(spec):
 class Viewer(object):
     def __init__(self, width, height, display=None):
 
+        self.fov = 45
+
         display = get_display(display)
         self.window = pyglet.window.Window(display=display,
             width=width, height=height, resizable=True
         )
-        @self.window.event
-        def on_resize(width, height):
-            print('The window was resized to %dx%d' % (width, height))
-            self._gl_setup()
-            self.set_fov(45)
 
+        self.window.on_resize = self._gl_setup
         self.window.on_close = self.window_closed_by_user
-        self.geoms = []
-        self.onetime_geoms = []
+        self.batches = []
 
-        self._gl_setup()
+        self._gl_setup(width, height)
         self._light_setup()
-        self.set_fov(45)
         self.set_bgcolor(0, 0, 0)
 
-    # also should be called on window resize
-    def _gl_setup(self):
-        glViewport(0, 0, self.window.width, self.window.height)
+    # called on window resize
+    def _gl_setup(self, width, height):
+        print("gl_setup called")
+        glViewport(0, 0, width, height)
         glFrontFace(GL_CCW)
         glEnable(GL_DEPTH_TEST)
+        self.set_fov()
 
     # should only be called once
     def _light_setup(self):
@@ -111,13 +98,13 @@ class Viewer(object):
     def set_bgcolor(self, r, g, b):
         glClearColor(r, g, b, 1.0)
 
-    def set_fov(self, degrees):
+    def set_fov(self):
         aspect = float(self.window.width) / self.window.height
         znear = 0.001
         zfar = 1000.0
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(degrees, aspect, znear, zfar)
+        gluPerspective(self.fov, aspect, znear, zfar)
 
     def look_at(self, eye, target, up):
         glMatrixMode(GL_MODELVIEW)
@@ -125,20 +112,16 @@ class Viewer(object):
         eye, target, up = list(eye), list(target), list(up)
         gluLookAt(*(eye + target + up))
 
-    def add_geom(self, geom):
-        self.geoms.append(geom)
+    def add_batch(self, batch):
+        self.batches.append(batch)
 
     def render(self, return_rgb_array=False):
         self.window.switch_to()
         self.window.dispatch_events()
-
-        self.set_fov(45)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        for geom in self.geoms:
-            geom.render()
-        for geom in self.onetime_geoms:
-            geom.render()
+        for batch in self.batches:
+            batch.draw()
 
         arr = None
         if return_rgb_array:
@@ -165,113 +148,112 @@ class Viewer(object):
         arr = arr.reshape(self.height, self.width, 4)
         return arr[::-1,:,0:3]
 
-def _add_attrs(geom, attrs):
-    if "color" in attrs:
-        geom.set_color(*attrs["color"])
-    if "linewidth" in attrs:
-        geom.set_linewidth(attrs["linewidth"])
+class _PygTransform(pyglet.graphics.Group):
+    def __init__(self, transform=np.eye(4), parent=None):
+        super().__init__(parent)
+        self.set_matrix(transform)
 
-class Geom(object):
+    def set_matrix(self, transform):
+        assert transform.shape == (4, 4)
+        assert np.all(transform[3,:] == [0, 0, 0, 1])
+        self.matrix_raw = (GLfloat * 16)(*transform.T.flatten())
 
-    def __init__(self):
-        self._color=Color((0, 0, 0, 1.0))
-        self.attrs = [self._color]
-    def render(self):
-        for attr in reversed(self.attrs):
-            attr.enable()
-        self.render1()
-        for attr in self.attrs:
-            attr.disable()
-    def render1(self):
-        raise NotImplementedError
-    def add_attr(self, attr):
-        self.attrs.append(attr)
-    def set_color(self, r, g, b):
-        self._color.vec4 = (r, g, b, 1)
-        return self
-    def set_translate(self, x, y, z):
-        translations = [a for a in self.attrs if isinstance(a, Translate)]
-        assert len(translations) <= 1
-        if len(translations) == 1:
-            translations[0].t = (x, y, z)
-        else:
-            self.translate(x, y, z)
-        return self
-
-    def set_rotation(self, mat):
-        rotations = [i for i, a in enumerate(self.attrs) if isinstance(a, Rotate)]
-        assert len(rotations) <= 1
-        if len(rotations) == 1:
-            i = rotations[0]
-            self.attrs[i] = Rotate(mat)
-        else:
-            self.add_attr(Rotate(mat))
-        return self
-
-    def translate(self, x, y, z):
-        self.add_attr(Translate(x, y, z))
-        return self
-
-class Attr(object):
-    def enable(self):
-        raise NotImplementedError
-    def disable(self):
-        pass
-
-class Transform(Attr):
-    def __init__(self, translation=(0.0, 0.0), rotation=0.0, scale=(1,1)):
-        self.set_translation(*translation)
-        self.set_rotation(rotation)
-        self.set_scale(*scale)
-    def enable(self):
-        glPushMatrix()
-        glTranslatef(self.translation[0], self.translation[1], 0) # translate to GL loc ppint
-        glRotatef(RAD2DEG * self.rotation, 0, 0, 1.0)
-        glScalef(self.scale[0], self.scale[1], 1)
-    def disable(self):
-        glPopMatrix()
-    def set_translation(self, newx, newy):
-        self.translation = (float(newx), float(newy))
-    def set_rotation(self, new):
-        self.rotation = float(new)
-    def set_scale(self, newx, newy):
-        self.scale = (float(newx), float(newy))
-
-class Translate(Attr):
-    def __init__(self, x, y, z):
-        self.t = (x, y, z)
-    def enable(self):
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        glTranslatef(*self.t)
-    def disable(self):
-        glPopMatrix()
-
-class Rotate(Attr):
-    def __init__(self, matrix):
-        m1 = np.vstack([matrix, np.array([0, 0, 0])])
-        matrix = np.hstack([m1, np.array([0, 0, 0, 1])[:,None]])
-        mf = matrix.T.flatten()
-        self.matrix_raw = (GLfloat * 16)(*matrix.T.flatten())
-    def enable(self):
+    def set_state(self):
         glMatrixMode(GL_MODELVIEW)
         glPushMatrix()
         glMultMatrixf(self.matrix_raw)
-    def disable(self):
+
+    def unset_state(self):
         glPopMatrix()
 
-def _rot2d(theta):
-    c = np.cos(theta)
-    s = np.sin(theta)
-    return np.array([[c, -s], [s, c]])
+class SceneNode(object):
+    def _build_children(self, batch):
+        if isinstance(self.children, type([])):
+            for c in self.children:
+                c.build(batch, self.pyg_grp)
+        else:
+            self.children.build(batch, self.pyg_grp)
+
+class World(SceneNode):
+    def __init__(self, children):
+        self.children = children
+        self.pyg_grp = None
+
+    def build(self, batch):
+        self._build_children(batch)
+
+class Transform(SceneNode):
+    def __init__(self, transform, children):
+        self.t = transform
+        self.children = children
+
+    def build(self, batch, parent):
+        self.pyg_grp = _PygTransform(self.t, parent=parent)
+        self._build_children(batch)
+        return self.pyg_grp
+
+    def set_transform(self, t):
+        self.pyg_grp.set_matrix(t)
+
+class Color(SceneNode):
+    def __init__(self, color, children):
+        self.color = color
+        self.children = children
+
+    def build(self, batch, parent):
+        self.pyg_grp = _PygColor(self.color, parent=parent)
+        self._build_children(batch)
+        return self.pyg_grp
+
+    def set_rgb(self, r, g, b):
+        self.pyg_grp.set_rgb(r, g, b)
+
+def transform_and_color(transform, color, children):
+    return Transform(transform, Color(color, children))
+
+class CheckerTexture(SceneNode):
+    def __init__(self, children):
+        self.children = children
+
+    def build(self, batch, parent):
+        self.pyg_grp = _PygCheckerTexture(parent=parent)
+        self._build_children(batch)
+        return self.pyg_grp
+
+#
+# these functions return 4x4 rotation matrix suitable to construct Transform
+# or to mutate Transform via set_matrix
+#
+def translate(x):
+    r = np.eye(4)
+    r[:3,3] = x
+    return r
+
+def trans_and_rot(t, r):
+    m = np.eye(4)
+    m[:3,:3] = r
+    m[:3,3] = t
+    return m
 
 def rotz(theta):
-    r = np.eye(3)
+    r = np.eye(4)
     r[:2,:2] = _rot2d(theta)
     return r
 
-class CheckerTexture(Attr):
-    def __init__(self):
+def roty(theta):
+    r = np.eye(4)
+    r2d = _rot2d(theta)
+    r[[0,0,2,2],[0,2,0,2]] = _rot2d(theta).flatten()
+    return r
+
+def rotx(theta):
+    r = np.eye(4)
+    r[1:3,1:3] = _rot2d(theta)
+    return r
+
+class _PygCheckerTexture(pyglet.graphics.Group):
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
         pattern = pyglet.image.CheckerImagePattern(
             color1=(30,30,30,255),
             color2=(50,50,50,255))
@@ -290,229 +272,140 @@ class CheckerTexture(Attr):
         glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
         glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
 
-    def enable(self):
+    def set_state(self):
         glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, (GLfloat * 4)(1,1,1,1))
         glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(1,1,1,1))
         glEnable(self.tex.target)
         glBindTexture(self.tex.target, self.tex.id)
 
-    def disable(self):
+    def unset_state(self):
         glDisable(self.tex.target)
 
-class Color(Attr):
-    def __init__(self, vec4):
-        self.vec4 = vec4
-    def enable(self):
-        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, (GLfloat * 4)(*self.vec4))
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(*self.vec4))
+class _PygColor(pyglet.graphics.Group):
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        if len(color) == 3:
+            self.set_rgb(*color)
+        else:
+            self.set_rgba(*color)
 
-class LineStyle(Attr):
-    def __init__(self, style):
-        self.style = style
-    def enable(self):
-        glEnable(GL_LINE_STIPPLE)
-        glLineStipple(1, self.style)
-    def disable(self):
-        glDisable(GL_LINE_STIPPLE)
+    def set_rgb(self, r, g, b):
+        self.color = (r, g, b, 1)
 
-class LineWidth(Attr):
-    def __init__(self, stroke):
-        self.stroke = stroke
-    def enable(self):
-        glLineWidth(self.stroke)
+    def set_rgba(self, r, g, b, a):
+        self.color = (r, g, b, a)
 
-class Point(Geom):
-    def __init__(self):
-        Geom.__init__(self)
-    def render1(self):
-        glBegin(GL_POINTS) # draw point
-        glVertex3f(0.0, 0.0, 0.0)
-        glEnd()
+    def set_state(self):
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, (GLfloat * 4)(*self.color))
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(*self.color))
 
-class FilledPolygon(Geom):
-    def __init__(self, v):
-        Geom.__init__(self)
-        self.v = v
-    def render1(self):
-        if   len(self.v) == 4 : glBegin(GL_QUADS)
-        elif len(self.v)  > 4 : glBegin(GL_POLYGON)
-        else: glBegin(GL_TRIANGLES)
-        for p in self.v:
-            glVertex3f(p[0], p[1],0)  # draw each vertex
-        glEnd()
+Batch = pyglet.graphics.Batch
 
-def make_circle(radius=10, res=30, filled=True):
-    points = []
-    for i in range(res):
-        ang = 2*math.pi*i / res
-        points.append((math.cos(ang)*radius, math.sin(ang)*radius))
-    if filled:
-        return FilledPolygon(points)
-    else:
-        return PolyLine(points, True)
+#
+# these are the 3d primitives that can be added to a pyglet.graphics.Batch.
+# construct them with the shape functions below.
+#
+class BatchElement(SceneNode):
+    def build(self, batch, parent):
+        self.batch_args[2] = parent
+        batch.add(*self.batch_args)
 
-def make_polygon(v, filled=True):
-    if filled: return FilledPolygon(v)
-    else: return PolyLine(v, True)
-
-def make_polyline(v):
-    return PolyLine(v, False)
-
-def make_capsule(length, width):
-    l, r, t, b = 0, length, width/2, -width/2
-    box = make_polygon([(l,b), (l,t), (r,t), (r,b)])
-    circ0 = make_circle(width/2)
-    circ1 = make_circle(width/2)
-    circ1.add_attr(Transform(translation=(length, 0)))
-    geom = Compound([box, circ0, circ1])
-    return geom
-
-class Compound(Geom):
-    def __init__(self, gs):
-        Geom.__init__(self)
-        self.gs = gs
-    def render1(self):
-        for g in self.gs:
-            g.render()
-    def set_color(self, r, g, b):
-        for gm in self.gs:
-            gm.set_color(r, g, b)
-
-class PolyLine(Geom):
-    def __init__(self, v, close):
-        Geom.__init__(self)
-        self.v = v
-        self.close = close
-        self.linewidth = LineWidth(1)
-        self.add_attr(self.linewidth)
-    def render1(self):
-        glBegin(GL_LINE_LOOP if self.close else GL_LINE_STRIP)
-        for p in self.v:
-            glVertex3f(p[0], p[1],0)  # draw each vertex
-        glEnd()
-    def set_linewidth(self, x):
-        self.linewidth.stroke = x
-
-class Line(Geom):
-    def __init__(self, start=(0.0, 0.0), end=(0.0, 0.0)):
-        Geom.__init__(self)
-        self.start = start
-        self.end = end
-        self.linewidth = LineWidth(1)
-        self.add_attr(self.linewidth)
-
-    def render1(self):
-        glBegin(GL_LINES)
-        glVertex2f(*self.start)
-        glVertex2f(*self.end)
-        glEnd()
-
-
-
-
-class Mesh(Geom):
-    def __init__(self, verts, uvs=None):
+class Mesh(BatchElement):
+    def __init__(self, verts, normals=None, st=None):
         if len(verts.shape) != 2 or verts.shape[1] != 3:
             raise ValueError('verts must be an N x 3 NumPy array')
 
-        nverts = verts.shape[0]
-        assert int(nverts) % 3 == 0
+        N = verts.shape[0]
+        assert int(N) % 3 == 0
 
-        if uvs is not None:
-            assert uvs.shape == (nverts, 2)
+        if st is not None:
+            assert st.shape == (N, 2)
 
-        super().__init__()
+        if normals is None:
+            # compute normals implied by triangle faces
+            normals = deepcopy(verts)
 
-        # implicit normals
-        normals = deepcopy(verts)
+            for i in range(0, N, 3):
+                v0, v1, v2 = verts[i:(i+3),:]
+                d0, d1 = (v1 - v0), (v2 - v1)
+                n = _normalize(np.cross(d0, d1))
+                normals[i:(i+3),:] = n
 
-        for i in range(0, nverts, 3):
-            v0, v1, v2 = verts[i:(i+3),:]
-            d0, d1 = (v1 - v0), (v2 - v1)
-            n = normalize(np.cross(d0, d1))
-            normals[i:(i+3),:] = n
-
-        args = [
-            ('v3f', list(verts.flatten())),
-            ('n3f', list(normals.flatten())),
+        self.batch_args = [N, pyglet.gl.GL_TRIANGLES, None,
+            ('v3f/static', list(verts.flatten())),
+            ('n3f/static', list(normals.flatten())),
         ]
-        if uvs is not None:
-            args.append(('t2f', list(uvs.flatten())))
+        if st is not None:
+            self.batch_args.append(('t2f/static', list(st.flatten())))
 
-        self.vertex_list = pyglet.graphics.vertex_list(nverts, *args)
-
-    def render1(self):
-        self.vertex_list.draw(GL_TRIANGLES)
-
-
-class Strip(Geom):
+class TriStrip(BatchElement):
     def __init__(self, verts, normals):
-        N, k, dim = verts.shape
-        assert k == 2
+        N, dim = verts.shape
         assert dim == 3
         assert normals.shape == verts.shape
 
-        super().__init__()
-
-        # TODO guess normals
-
-        self.vertex_list = pyglet.graphics.vertex_list(N * 2,
-            ('v3f', list(verts.flatten())),
-            ('n3f', list(normals.flatten())))
-
-    def render1(self):
-        self.vertex_list.draw(GL_TRIANGLE_STRIP)
-
-
-class Mesh_Indexed(Geom):
-    def __init__(self, verts, tris):
-        if len(verts.shape) != 2 or verts.shape[1] != 3:
-            raise ValueError('verts must be an N x 3 NumPy array')
-        if (len(tris.shape) != 2 or tris.shape[1] != 3 or np.any(np.mod(tris, 1) != 0)):
-            raise ValueError('tris must be an N x 3 NumPy array of nonnegative integer values')
-        nverts = verts.shape[0]
-        ntris = tris.shape[0]
-        if np.any(tris >= nverts):
-            raise IndexError('tris contains an index >= the number of vertices')
-
-        super().__init__()
-
-        verts = verts.astype(np.float32)
-        tris = tris.astype(np.uint32)
-
-        self.vertex_list = pyglet.graphics.vertex_list_indexed(
-            nverts,
-            list(tris.flatten().astype(np.uint32)),
-            ('v3f', list(verts.flatten())),
-        )
-
-    def render1(self):
-        self.vertex_list.draw(GL_TRIANGLES)
-
+        self.batch_args = [N, pyglet.gl.GL_TRIANGLE_STRIP, None,
+            ('v3f/static', list(verts.flatten())),
+            ('n3f/static', list(normals.flatten()))
+        ]
 
 # a box centered on the origin
-class Box(Mesh):
-    def __init__(self, x, y, z):
-        vtop = np.array([[x, y, z], [x, -y, z], [-x, -y, z], [-x, y, z]])
-        vbottom = deepcopy(vtop)
-        vbottom[:,2] = -vbottom[:,2]
-        v = 0.5 * np.concatenate([vtop, vbottom], axis=0)
-        t = np.array([[1, 3, 2,], [1, 4, 3,], [1, 2, 5,], [2, 6, 5,], [2, 3, 6,], [3, 7, 6,], [3, 4, 8,], [3, 8, 7,], [4, 1, 8,], [1, 5, 8,], [5, 6, 7,], [5, 7, 8,]]) - 1
-        t = t.flatten()
-        assert len(t) == 2 * 3 * 6
-        v = v[t,:]
-        super().__init__(v)
+def box(x, y, z):
+    v = box_mesh(x, y, z)
+    return Mesh(v)
 
-# add degenerate tris, convert from N x 2 x 3 to 2N+2 x 3
-def to_strip(strip):
-    s0 = strip[0,0,:]
-    s1 = strip[-1,-1,:]
-    return np.vstack([s0, np.reshape(strip, (-1, 3)), s1])
+# cylinder sitting on xy plane pointing +z
+def cylinder(radius, height, sections):
+    v, n = cylinder_strip(radius, height, sections)
+    return TriStrip(v, n)
 
-def _withz(a, z):
-    b = 0 + a
-    b[:,2] = z
-    return b
+# cone sitting on xy plane pointing +z
+def cone(radius, height, sections):
+    v, n = cone_strip(radius, height, sections)
+    return TriStrip(v, n)
+
+# arrow sitting on xy plane pointing +z
+def arrow(radius, height, sections):
+    v, n = arrow_strip(radius, height, sections)
+    return TriStrip(v, n)
+
+# sphere centered on origin, n tris will be about TODO * facets
+def sphere(radius, facets):
+    v, n = sphere_strip(radius, facets)
+    return TriStrip(v, n)
+
+# square in xy plane centered on origin
+# dim: (w, h)
+# srange, trange: desired min/max (s, t) tex coords
+def rect(dim, srange=(0,1), trange=(0,1)):
+    v = np.array([
+        [1, 1, 0], [-1, 1, 0], [1, -1, 0],
+        [-1, 1, 0], [-1, -1, 0], [1, -1, 0]])
+    v = np.matmul(v, np.diag([dim[0] / 2.0, dim[1] / 2.0, 0]))
+    n = _withz(0 * v, 1)
+    s0, s1 = srange
+    t0, t1 = trange
+    st = np.array([
+        [s1, t1], [s0, t1], [s1, t0],
+        [s0, t1], [s0, t0], [s1, t0]])
+    return Mesh(v, n, st)
+
+#
+# low-level primitive builders. return vertex/normal/texcoord arrays.
+# good if you want to apply transforms directly to the points, etc.
+#
+
+# box centered on origin with given dimensions.
+# no normals, but Mesh ctor will estimate them perfectly
+def box_mesh(x, y, z):
+    vtop = np.array([[x, y, z], [x, -y, z], [-x, -y, z], [-x, y, z]])
+    vbottom = deepcopy(vtop)
+    vbottom[:,2] = -vbottom[:,2]
+    v = 0.5 * np.concatenate([vtop, vbottom], axis=0)
+    t = np.array([[1, 3, 2,], [1, 4, 3,], [1, 2, 5,], [2, 6, 5,], [2, 3, 6,], [3, 7, 6,], [3, 4, 8,], [3, 8, 7,], [4, 1, 8,], [1, 5, 8,], [5, 6, 7,], [5, 7, 8,]]) - 1
+    t = t.flatten()
+    v = v[t,:]
+    return v
 
 # cylinder sitting on the x-y plane
 def cylinder_strip(radius, height, sections):
@@ -522,13 +415,13 @@ def cylinder_strip(radius, height, sections):
 
     base = np.hstack([x, y, 0*t])
     top = np.hstack([x, y, height + 0*t])
-    strip_sides = to_strip(np.hstack([top[:,None,:], base[:,None,:]]))
+    strip_sides = _to_strip(np.hstack([top[:,None,:], base[:,None,:]]))
     normals_sides = _withz(strip_sides / radius, 0)
 
     def make_cap(circle, normal_z):
         height = circle[0,2]
         center = _withz(0 * circle, height)
-        strip = to_strip(np.hstack([center[:,None,:], circle[:,None,:]]))
+        strip = _to_strip(np.hstack([center[:,None,:], circle[:,None,:]]))
         normals = _withz(0 * strip, normal_z)
         return strip, normals
 
@@ -538,6 +431,7 @@ def cylinder_strip(radius, height, sections):
         np.vstack([strip_sides, vbase, vtop]),
         np.vstack([normals_sides, nbase, ntop]))
 
+# cone sitting on the x-y plane
 def cone_strip(radius, height, sections):
     t = np.linspace(0, 2 * np.pi, sections + 1)[:,None]
     x = radius * np.cos(t)
@@ -545,145 +439,86 @@ def cone_strip(radius, height, sections):
     base = np.hstack([x, y, 0*t])
 
     top = _withz(0 * base, height)
-    vside = to_strip(np.hstack([top[:,None,:], base[:,None,:]]))
-    base_tangent = np.cross(npa(0, 0, 1), base)
+    vside = _to_strip(np.hstack([top[:,None,:], base[:,None,:]]))
+    base_tangent = np.cross(_npa(0, 0, 1), base)
     top_to_base = base - top
-    normals = normalize(np.cross(top_to_base, base_tangent))
-    nside = to_strip(np.hstack([normals[:,None,:], normals[:,None,:]]))
+    normals = _normalize(np.cross(top_to_base, base_tangent))
+    nside = _to_strip(np.hstack([normals[:,None,:], normals[:,None,:]]))
 
     base_ctr = 0 * base
-    vbase = to_strip(np.hstack([base_ctr[:,None,:], base[:,None,:]]))
+    vbase = _to_strip(np.hstack([base_ctr[:,None,:], base[:,None,:]]))
     nbase = _withz(0 * vbase, -1)
 
     return np.vstack([vside]), np.vstack([nside])
 
-class Cone2(Strip):
-    def __init__(self, radius, height, sections):
-        v, n = cone_strip(radius, height, sections)
-        v = v.reshape(-1, 2, 3)
-        n = n.reshape(-1, 2, 3)
-        super().__init__(v, n)
+# sphere centered on origin
+def sphere_strip(radius, resolution):
+    t = np.linspace(-1, 1, resolution)
+    u, v = np.meshgrid(t, t)
+    vtx = []
+    panel = np.zeros((resolution, resolution, 3))
+    inds = list(range(3))
+    for i in range(3):
+        panel[:,:,inds[0]] = u
+        panel[:,:,inds[1]] = v
+        panel[:,:,inds[2]] = 1
+        norms = np.linalg.norm(panel, axis=2)
+        panel = panel / np.tile(norms[:,:,None], (1, 1, 3))
+        for _ in range(2):
+            for j in range(resolution - 1):
+                strip = deepcopy(panel[[j,j+1],:,:].transpose([1,0,2]).reshape((-1,3)))
+                degen0 = deepcopy(strip[0,:])
+                degen1 = deepcopy(strip[-1,:])
+                vtx.extend([degen0, strip, degen1])
+            panel *= -1
+        inds = [inds[-1]] + inds[:-1]
 
-# a cone sitting on xy plane with radius r, height h, n facets
-class Cone(Mesh):
-    def __init__(self, radius, height, sections):
-        n = sections
-        r = radius
-        h = height
-        step = 2 * np.pi / n
-        theta = step * np.arange(sections)[:,None]
-        vbase = np.hstack([r * np.cos(theta), r * np.sin(theta), 0 * theta])
-        v = np.vstack([[0, 0, 0], vbase, [0, 0, height]])
-        tbase = np.hstack([
-            np.ones((n-1,1)),
-            np.arange(3,n+2)[:,None],
-            np.arange(2,n+1)[:,None]])
-        tbase = np.vstack([tbase, [1, 2, n+1]])
-        tcone = deepcopy(tbase)
-        tcone[:,0] = n+2;
-        t = np.vstack([tbase, tcone])
-        assert np.all(t % 1 == 0)
-        t = t.flatten().astype(np.uint32) - 1
-        v = v[t,:]
-        super().__init__(v)
+    n = np.vstack(vtx)
+    v = radius * n
+    return v, n
 
-
-# make an arrow sitting on xy plane with tube radius r, total height h, n facets
-class Arrow(Compound):
-    def __init__(self, radius, height, facets):
-        cyl_r = radius
-        cyl_h = 0.75 * height
-        cone_h = height - cyl_h
-        cone_half_angle = np.radians(30)
-        cone_r = cone_h * np.tan(cone_half_angle)
-        cyl = Cylinder2(cyl_r, cyl_h, facets)
-        cone = Cone2(cone_r, cone_h, facets).translate(0,0,cyl_h)
-        super().__init__([cyl, cone])
-
-# square in xy plane centered on origin
-class Rect(Mesh):
-    # dim: (w, h)
-    # urange, vrange: desired min/max (u, v) tex coords
-    def __init__(self, dim, urange=(0,1), vrange=(0,1)):
-        v = np.array([
-            [1, 1, 0], [-1, 1, 0], [1, -1, 0],
-            [-1, 1, 0], [-1, -1, 0], [1, -1, 0]])
-        vtx = np.matmul(v, np.diag([dim[0] / 2.0, dim[1] / 2.0, 0]))
-        u0, u1 = urange
-        v0, v1 = vrange
-        uv = np.array([
-            [u1, v1], [u0, v1], [u1, v0],
-            [u0, v1], [u0, v0], [u1, v0]])
-        super().__init__(vtx, uv)
-
-class Cylinder2(Strip):
-    def __init__(self, radius, height, sections):
-        v, n = cylinder_strip(radius, height, sections)
-        v = v.reshape(-1, 2, 3)
-        n = n.reshape(-1, 2, 3)
-        super().__init__(v, n)
-
-class Sphere(Strip):
-    def __init__(self, radius, resolution):
-        t = np.linspace(-1, 1, resolution)
-        u, v = np.meshgrid(t, t)
-        vtx = []
-        panel = np.zeros((resolution, resolution, 3))
-        inds = list(range(3))
-        for i in range(3):
-            panel[:,:,inds[0]] = u
-            panel[:,:,inds[1]] = v
-            panel[:,:,inds[2]] = 1
-            norms = np.linalg.norm(panel, axis=2)
-            panel = panel / np.tile(norms[:,:,None], (1, 1, 3))
-            for _ in range(2):
-                for j in range(resolution - 1):
-                    strip = deepcopy(panel[[j,j+1],:,:].transpose([1,0,2]).reshape((-1,3)))
-                    degen0 = deepcopy(strip[0,:])
-                    degen1 = deepcopy(strip[-1,:])
-                    vtx.extend([degen0, strip, degen1])
-                panel *= -1
-            inds = [inds[-1]] + inds[:-1]
-
-        strip = np.vstack(vtx).reshape(-1,2,3)
-        super().__init__(radius * strip, strip)
+# arrow sitting on x-y plane
+def arrow_strip(radius, height, facets):
+    cyl_r = radius
+    cyl_h = 0.75 * height
+    cone_h = height - cyl_h
+    cone_half_angle = np.radians(30)
+    cone_r = cone_h * np.tan(cone_half_angle)
+    vcyl, ncyl = cylinder_strip(cyl_r, cyl_h, facets)
+    vcone, ncone = cone_strip(cone_r, cone_h, facets)
+    vcone[:,2] += cyl_h
+    v = np.vstack([vcyl, vcone])
+    n = np.vstack([ncyl, ncone])
+    return v, n
 
 
-class Image(Geom):
-    def __init__(self, fname, width, height):
-        Geom.__init__(self)
-        self.width = width
-        self.height = height
-        img = pyglet.image.load(fname)
-        self.img = img
-        self.flip = False
-    def render1(self):
-        self.img.blit(-self.width/2, -self.height/2, width=self.width, height=self.height)
+#
+# private helper functions, not part of API
+#
+def _npa(*args):
+    return np.array(args)
 
-# ================================================================
+def _normalize(x):
+    if len(x.shape) == 1:
+        return x / np.linalg.norm(x)
+    elif len(x.shape) == 2:
+        return x / np.linalg.norm(x, axis=1)[:,None]
+    else:
+        assert False
 
-class SimpleImageViewer(object):
-    def __init__(self, display=None):
-        self.window = None
-        self.isopen = False
-        self.display = display
-    def imshow(self, arr):
-        if self.window is None:
-            height, width, channels = arr.shape
-            self.window = pyglet.window.Window(width=width, height=height, display=self.display)
-            self.width = width
-            self.height = height
-            self.isopen = True
-        assert arr.shape == (self.height, self.width, 3), "You passed in an image with the wrong number shape"
-        image = pyglet.image.ImageData(self.width, self.height, 'RGB', arr.tobytes(), pitch=self.width * -3)
-        self.window.clear()
-        self.window.switch_to()
-        self.window.dispatch_events()
-        image.blit(0,0)
-        self.window.flip()
-    def close(self):
-        if self.isopen:
-            self.window.close()
-            self.isopen = False
-    def __del__(self):
-        self.close()
+def _withz(a, z):
+    b = 0 + a
+    b[:,2] = z
+    return b
+
+def _rot2d(theta):
+    c = np.cos(theta)
+    s = np.sin(theta)
+    return np.array([[c, -s], [s, c]])
+
+# add degenerate tris, convert from N x 2 x 3 to 2N+2 x 3
+def _to_strip(strip):
+    s0 = strip[0,0,:]
+    s1 = strip[-1,-1,:]
+    return np.vstack([s0, np.reshape(strip, (-1, 3)), s1])
+

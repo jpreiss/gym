@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 
 GRAV = 9.81
 
-def quadrotor_3dmodel(diameter):
-    r = diameter / 2
-    prop_r = 0.3 * diameter
+def quadrotor_3dmodel(diam):
+    r = diam / 2
+    prop_r = 0.3 * diam
     prop_h = prop_r / 20.0
 
     # "X" propeller configuration, start fwd left, go clockwise
@@ -31,21 +31,21 @@ def quadrotor_3dmodel(diameter):
     colors = ((1,0,0), (1,0,0), (0,1,0), (0,1,0))
     def disc(translation, color):
         color = 0.3 * np.array(list(color)) + 0.2
-        disc = r3d.Cylinder2(prop_r, prop_h, 32).translate(*translation)
-        disc.set_color(*color)
+        disc = r3d.transform_and_color(r3d.translate(translation), color,
+            r3d.cylinder(prop_r, prop_h, 32))
         return disc
     props = [disc(d, c) for d, c in zip(deltas, colors)]
 
-    arm_thicc = diameter / 20.0
-    arm1 = r3d.Box(diameter, diameter/10, arm_thicc).translate(0, 0, -arm_thicc)
-    arm1.set_rotation(r3d.rotz(np.pi/4)).set_color(0.5, 0.5, 0.5)
-    arm2 = r3d.Box(diameter, diameter/10, arm_thicc).translate(0, 0, -arm_thicc)
-    arm2.set_rotation(r3d.rotz(3*np.pi/4)).set_color(0.5, 0.5, 0.5)
-    arrow = r3d.Arrow(0.12*prop_r, 2.5*prop_r, 16)
-    arrow.set_color(0.3, 0.3, 1.0)
+    arm_thicc = diam / 20.0
+    arm_color = (0.5, 0.5, 0.5)
+    arms = r3d.transform_and_color(
+        np.matmul(r3d.translate((0, 0, -arm_thicc)), r3d.rotz(np.pi / 4)), arm_color,
+        [r3d.box(diam/10, diam, arm_thicc), r3d.box(diam, diam/10, arm_thicc)])
 
-    bodies = props + [arm1, arm2, arrow]
-    return r3d.Compound(bodies)
+    arrow = r3d.Color((0.3, 0.3, 1.0), r3d.arrow(0.12*prop_r, 2.5*prop_r, 16))
+
+    bodies = props + [arms, arrow]
+    return r3d.Transform(np.eye(4), bodies)
 
 def is_orthonormal(m):
     return np.max(np.abs(np.matmul(m, m.T) - np.eye(3)).flatten()) < 0.00001
@@ -178,7 +178,7 @@ class ChaseCamera(object):
     def __init__(self, pos=npa(0,0,0), vel=npa(0,0,0)):
         self.pos_smooth = pos
         self.vel_smooth = vel
-        self.view_dist = 3
+        self.view_dist = 4
 
     def step(self, pos, vel):
         # lowpass filter
@@ -191,14 +191,16 @@ class ChaseCamera(object):
     def look_at(self):
         veln, n = normalize(self.vel_smooth)
         up = npa(0, 0, 1)
-        if np.abs(veln[2]) > 0.95 or n < 0.1 or True:
+        if np.abs(veln[2]) > 0.95 or n < 0.001:
             # look over quadrotor's right shoulder, like we're in passenger seat
-            right, _ = normalize(npa(-0.9, -0.3, 0))
+            to_eye, _ = normalize(npa(-0.9, -0.3, 0))
             #fwd = npa(0, 1, 0)
         else:
             right, _ = normalize(np.cross(veln, up))
+            back = normalize(np.cross(right, up))
+            to_eye, _ = normalize(0.9 * back + 0.3 * right)
             #fwd = np.cross(up, right)
-        eye = self.pos_smooth + self.view_dist * (right + 0.3 * up)
+        eye = self.pos_smooth + self.view_dist * (to_eye + 0.3 * up)
         center = self.pos_smooth
         return eye, center, up
 
@@ -272,7 +274,9 @@ class QuadrotorEnv(gym.Env):
         return sv, reward, done, {}
 
     def _reset(self):
-        pos = npa(-20, 0, 2)
+        x, y = self.np_random.uniform(-20, 20, size=(2,))
+        z = self.np_random.uniform(1, 4)
+        pos = npa(x, y, z)
         vel = omega = npa(0, 0, 0)
         rotation = np.eye(3)
         self.dynamics.set_state(pos, vel, rotation, omega)
@@ -294,20 +298,25 @@ class QuadrotorEnv(gym.Env):
         if self.viewer is None:
             self.viewer = r3d.Viewer(screen_width, screen_height)
             diameter = 2 * self.dynamics.arm
-            self.model = quadrotor_3dmodel(diameter).set_rotation(np.eye(3)).translate(*self.dynamics.pos)
-            self.viewer.add_geom(self.model)
 
-            floor = r3d.Rect((1000, 1000), (0, 100), (0, 100))
-            floor.attrs = []
-            floor.add_attr(r3d.CheckerTexture())
-            self.viewer.add_geom(floor)
+            self.quad_transform = quadrotor_3dmodel(diameter)
 
-            goal = r3d.Sphere(diameter/3.0, 18).translate(*self.goal)
-            goal.set_color(0.5,0.4,0)
-            self.viewer.add_geom(goal)
+            floor = r3d.CheckerTexture(
+                r3d.rect((1000, 1000), (0, 100), (0, 100)))
 
-        self.model.set_translate(*self.dynamics.pos)
-        self.model.set_rotation(self.dynamics.rot)
+            goal = r3d.transform_and_color(r3d.translate(self.goal),
+                (0.5, 0.4, 0), r3d.sphere(diameter/3.0, 18))
+
+            world = r3d.World([self.quad_transform, floor, goal])
+            batch = r3d.Batch()
+            world.build(batch)
+            print("batch", batch)
+            print(batch.__dict__)
+
+            self.viewer.add_batch(batch)
+
+        matrix = r3d.trans_and_rot(self.dynamics.pos, self.dynamics.rot)
+        self.quad_transform.set_transform(matrix)
 
         eye, center, up = self.camera.look_at()
         self.viewer.look_at(eye, center, up)
