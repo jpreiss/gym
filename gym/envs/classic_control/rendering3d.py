@@ -31,8 +31,16 @@ import numpy as np
 
 RAD2DEG = 57.29577951308232
 
+def npa(*args):
+    return np.array(args)
+
 def normalize(x):
-    return x / np.linalg.norm(x)
+    if len(x.shape) == 1:
+        return x / np.linalg.norm(x)
+    elif len(x.shape) == 2:
+        return x / np.linalg.norm(x, axis=1)[:,None]
+    else:
+        assert False
 
 def get_display(spec):
     """Convert a display specification (such as :0) into an actual Display
@@ -49,52 +57,34 @@ def get_display(spec):
 
 class Viewer(object):
     def __init__(self, width, height, display=None):
-        display = get_display(display)
 
-        self.width = width
-        self.height = height
-        self.window = pyglet.window.Window(width=width, height=height, display=display)
+        display = get_display(display)
+        self.window = pyglet.window.Window(display=display,
+            width=width, height=height, resizable=True
+        )
+        @self.window.event
+        def on_resize(width, height):
+            print('The window was resized to %dx%d' % (width, height))
+            self._gl_setup()
+            self.set_fov(45)
+
         self.window.on_close = self.window_closed_by_user
         self.geoms = []
         self.onetime_geoms = []
-        #glEnable(GL_BLEND)
-        #glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-    def close(self):
-        self.window.close()
+        self._gl_setup()
+        self._light_setup()
+        self.set_fov(45)
+        self.set_bgcolor(0, 0, 0)
 
-    def window_closed_by_user(self):
-        self.close()
-
-    def add_geom(self, geom):
-        self.geoms.append(geom)
-
-    def add_onetime(self, geom):
-        self.onetime_geoms.append(geom)
-
-    def look_at(self, eye, target, up):
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        eye, target, up = list(eye), list(target), list(up)
-        gluLookAt(*(eye + target + up))
-
-    def render(self, return_rgb_array=False):
-        self.window.switch_to()
-        self.window.dispatch_events()
-
-        glClearColor(0,0,0,1)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        glViewport(0, 0, self.width, self.height)
+    # also should be called on window resize
+    def _gl_setup(self):
+        glViewport(0, 0, self.window.width, self.window.height)
         glFrontFace(GL_CCW)
         glEnable(GL_DEPTH_TEST)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        fov = 60.0
-        aspect = float(self.width) / self.height
-        znear = 0.001
-        zfar = 1000.0
-        gluPerspective(fov, aspect, znear, zfar)
 
+    # should only be called once
+    def _light_setup(self):
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
         glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(40.0, 100.0, 60.0, 1))
@@ -107,6 +97,43 @@ class Viewer(object):
         glLightfv(GL_LIGHT1, GL_DIFFUSE, (GLfloat * 4)(0.5, 0.5, 0.5, 1))
         glLightfv(GL_LIGHT1, GL_SPECULAR, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
         glEnable(GL_LIGHT1)
+
+    def close(self):
+        self.window.close()
+
+    def window_closed_by_user(self):
+        self.close()
+
+    #
+    # public interface
+    #
+
+    def set_bgcolor(self, r, g, b):
+        glClearColor(r, g, b, 1.0)
+
+    def set_fov(self, degrees):
+        aspect = float(self.window.width) / self.window.height
+        znear = 0.001
+        zfar = 1000.0
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(degrees, aspect, znear, zfar)
+
+    def look_at(self, eye, target, up):
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        eye, target, up = list(eye), list(target), list(up)
+        gluLookAt(*(eye + target + up))
+
+    def add_geom(self, geom):
+        self.geoms.append(geom)
+
+    def render(self, return_rgb_array=False):
+        self.window.switch_to()
+        self.window.dispatch_events()
+
+        self.set_fov(45)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         for geom in self.geoms:
             geom.render()
@@ -261,7 +288,6 @@ class CheckerTexture(Attr):
         # anisotropic texturing helps a lot with checkerboard floors
         anisotropy = (GLfloat)()
         glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
-        print("max anisotropy:", anisotropy)
         glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
 
     def enable(self):
@@ -477,48 +503,66 @@ class Box(Mesh):
         v = v[t,:]
         super().__init__(v)
 
+# add degenerate tris, convert from N x 2 x 3 to 2N+2 x 3
+def to_strip(strip):
+    s0 = strip[0,0,:]
+    s1 = strip[-1,-1,:]
+    return np.vstack([s0, np.reshape(strip, (-1, 3)), s1])
 
-# cylinder centered on the origin
-class Cylinder(Mesh):
+def _withz(a, z):
+    b = 0 + a
+    b[:,2] = z
+    return b
+
+# cylinder sitting on the x-y plane
+def cylinder_strip(radius, height, sections):
+    t = np.linspace(0, 2 * np.pi, sections + 1)[:,None]
+    x = radius * np.cos(t)
+    y = radius * np.sin(t)
+
+    base = np.hstack([x, y, 0*t])
+    top = np.hstack([x, y, height + 0*t])
+    strip_sides = to_strip(np.hstack([top[:,None,:], base[:,None,:]]))
+    normals_sides = _withz(strip_sides / radius, 0)
+
+    def make_cap(circle, normal_z):
+        height = circle[0,2]
+        center = _withz(0 * circle, height)
+        strip = to_strip(np.hstack([center[:,None,:], circle[:,None,:]]))
+        normals = _withz(0 * strip, normal_z)
+        return strip, normals
+
+    vbase, nbase = make_cap(base, -1)
+    vtop, ntop = make_cap(top, 1)
+    return (
+        np.vstack([strip_sides, vbase, vtop]),
+        np.vstack([normals_sides, nbase, ntop]))
+
+def cone_strip(radius, height, sections):
+    t = np.linspace(0, 2 * np.pi, sections + 1)[:,None]
+    x = radius * np.cos(t)
+    y = radius * np.sin(t)
+    base = np.hstack([x, y, 0*t])
+
+    top = _withz(0 * base, height)
+    vside = to_strip(np.hstack([top[:,None,:], base[:,None,:]]))
+    base_tangent = np.cross(npa(0, 0, 1), base)
+    top_to_base = base - top
+    normals = normalize(np.cross(top_to_base, base_tangent))
+    nside = to_strip(np.hstack([normals[:,None,:], normals[:,None,:]]))
+
+    base_ctr = 0 * base
+    vbase = to_strip(np.hstack([base_ctr[:,None,:], base[:,None,:]]))
+    nbase = _withz(0 * vbase, -1)
+
+    return np.vstack([vside]), np.vstack([nside])
+
+class Cone2(Strip):
     def __init__(self, radius, height, sections):
-        step = 2 * np.pi / sections;
-        theta = step * np.arange(sections)
-        theta = theta[:,None]
-        vtop = np.concatenate([
-            radius * np.cos(theta),
-            radius * np.sin(theta),
-            height / 2.0 * np.ones((sections,1))],
-            axis=1)
-        vbottom = deepcopy(vtop);
-        vbottom[:,2] = -height / 2;
-        verts = np.vstack([
-            np.array([0, 0, height / 2.0]),
-            vtop,
-            np.array([0, 0, -height / 2.0]),
-            vbottom])
-        tris_top = np.hstack([
-            np.ones((sections-1, 1)),
-            np.arange(2,sections+1)[:,None],
-            np.arange(3,sections+2)[:,None]])
-        tris_top = np.vstack([tris_top, np.array([1, sections + 1, 2])])
-        tris_bottom = sections + 1 + tris_top;
-        v1 = np.arange(2, sections + 1)[:,None]
-        v2 = v1 + 1;
-        v3 = v1 + sections + 1;
-        v4 = v3 + 1;
-        tris_side = np.concatenate([
-            np.concatenate([v1, v2, v3], axis=1),
-            np.concatenate([v3, v2, v4], axis=1)],
-            axis=0)
-        tris_side = np.vstack([
-            tris_side,
-            np.array([sections + 1, 2, 2*(sections+1)]),
-            np.array([2*(sections+1), 2, 2+sections+1])])
-        tris = np.concatenate([tris_top, tris_bottom, tris_side]) - 1
-        assert np.all(tris % 1 == 0)
-        tris = tris.flatten().astype(np.uint32)
-        v = verts[tris,:]
-        super().__init__(v)
+        v, n = cone_strip(radius, height, sections)
+        v = v.reshape(-1, 2, 3)
+        n = n.reshape(-1, 2, 3)
+        super().__init__(v, n)
 
 # a cone sitting on xy plane with radius r, height h, n facets
 class Cone(Mesh):
@@ -548,12 +592,12 @@ class Cone(Mesh):
 class Arrow(Compound):
     def __init__(self, radius, height, facets):
         cyl_r = radius
-        cyl_h = 0.7 * height
+        cyl_h = 0.75 * height
         cone_h = height - cyl_h
         cone_half_angle = np.radians(30)
         cone_r = cone_h * np.tan(cone_half_angle)
-        cyl = Cylinder(cyl_r, cyl_h, facets).translate(0,0,cyl_h/2)
-        cone = Cone(cone_r, cone_h, facets).translate(0,0,cyl_h)
+        cyl = Cylinder2(cyl_r, cyl_h, facets)
+        cone = Cone2(cone_r, cone_h, facets).translate(0,0,cyl_h)
         super().__init__([cyl, cone])
 
 # square in xy plane centered on origin
@@ -571,6 +615,13 @@ class Rect(Mesh):
             [u1, v1], [u0, v1], [u1, v0],
             [u0, v1], [u0, v0], [u1, v0]])
         super().__init__(vtx, uv)
+
+class Cylinder2(Strip):
+    def __init__(self, radius, height, sections):
+        v, n = cylinder_strip(radius, height, sections)
+        v = v.reshape(-1, 2, 3)
+        n = n.reshape(-1, 2, 3)
+        super().__init__(v, n)
 
 class Sphere(Strip):
     def __init__(self, radius, resolution):
