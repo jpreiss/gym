@@ -29,8 +29,6 @@ except ImportError as e:
 import math
 import numpy as np
 
-RAD2DEG = 57.29577951308232
-
 def get_display(spec):
     """Convert a display specification (such as :0) into an actual Display
     object.
@@ -45,6 +43,11 @@ def get_display(spec):
         raise error.Error('Invalid display specification: {}. (Must be a string like :0 or None.)'.format(spec))
 
 class Viewer(object):
+
+    #
+    # public interface
+    #
+
     def __init__(self, width, height, display=None):
 
         self.fov = 45
@@ -62,46 +65,16 @@ class Viewer(object):
         self._light_setup()
         self.set_bgcolor(0, 0, 0)
 
-    # called on window resize
-    def _gl_setup(self, width, height):
-        print("gl_setup called")
-        glViewport(0, 0, width, height)
-        glFrontFace(GL_CCW)
-        glEnable(GL_DEPTH_TEST)
-        self.set_fov()
-
-    # should only be called once
-    def _light_setup(self):
-        glShadeModel(GL_SMOOTH)
-        glEnable(GL_LIGHTING)
-        glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(40.0, 100.0, 60.0, 1))
-        glLightfv(GL_LIGHT0, GL_AMBIENT, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, (GLfloat * 4)(0.8, 0.8, 0.8, 1))
-        glLightfv(GL_LIGHT0, GL_SPECULAR, (GLfloat * 4)(0.4, 0.4, 0.4, 1))
-        glEnable(GL_LIGHT0)
-        glLightfv(GL_LIGHT1, GL_POSITION, (GLfloat * 4)(-200, -40.0, -20.0, 1))
-        glLightfv(GL_LIGHT1, GL_AMBIENT, (GLfloat * 4)(0.1, 0.1, 0.1, 1))
-        glLightfv(GL_LIGHT1, GL_DIFFUSE, (GLfloat * 4)(0.5, 0.5, 0.5, 1))
-        glLightfv(GL_LIGHT1, GL_SPECULAR, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
-        glEnable(GL_LIGHT1)
-
     def close(self):
         self.window.close()
-
-    def window_closed_by_user(self):
-        self.close()
-
-    #
-    # public interface
-    #
 
     def set_bgcolor(self, r, g, b):
         glClearColor(r, g, b, 1.0)
 
     def set_fov(self):
         aspect = float(self.window.width) / self.window.height
-        znear = 0.001
-        zfar = 1000.0
+        znear = 0.1
+        zfar = 100.0
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         gluPerspective(self.fov, aspect, znear, zfar)
@@ -148,23 +121,34 @@ class Viewer(object):
         arr = arr.reshape(self.height, self.width, 4)
         return arr[::-1,:,0:3]
 
-class _PygTransform(pyglet.graphics.Group):
-    def __init__(self, transform=np.eye(4), parent=None):
-        super().__init__(parent)
-        self.set_matrix(transform)
+    #
+    # private methods
+    #
 
-    def set_matrix(self, transform):
-        assert transform.shape == (4, 4)
-        assert np.all(transform[3,:] == [0, 0, 0, 1])
-        self.matrix_raw = (GLfloat * 16)(*transform.T.flatten())
+    # called on window resize
+    def _gl_setup(self, width, height):
+        glViewport(0, 0, width, height)
+        glFrontFace(GL_CCW)
+        glEnable(GL_DEPTH_TEST)
+        self.set_fov()
 
-    def set_state(self):
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        glMultMatrixf(self.matrix_raw)
+    # should only be called once
+    def _light_setup(self):
+        glShadeModel(GL_SMOOTH)
+        glEnable(GL_LIGHTING)
+        glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(40.0, 100.0, 60.0, 1))
+        glLightfv(GL_LIGHT0, GL_AMBIENT, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, (GLfloat * 4)(0.8, 0.8, 0.8, 1))
+        glLightfv(GL_LIGHT0, GL_SPECULAR, (GLfloat * 4)(0.4, 0.4, 0.4, 1))
+        glEnable(GL_LIGHT0)
+        glLightfv(GL_LIGHT1, GL_POSITION, (GLfloat * 4)(-200, -40.0, -20.0, 1))
+        glLightfv(GL_LIGHT1, GL_AMBIENT, (GLfloat * 4)(0.1, 0.1, 0.1, 1))
+        glLightfv(GL_LIGHT1, GL_DIFFUSE, (GLfloat * 4)(0.5, 0.5, 0.5, 1))
+        glLightfv(GL_LIGHT1, GL_SPECULAR, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
+        glEnable(GL_LIGHT1)
 
-    def unset_state(self):
-        glPopMatrix()
+    def window_closed_by_user(self):
+        self.close()
 
 class SceneNode(object):
     def _build_children(self, batch):
@@ -195,6 +179,17 @@ class Transform(SceneNode):
     def set_transform(self, t):
         self.pyg_grp.set_matrix(t)
 
+class BackToFront(SceneNode):
+    def __init__(self, children):
+        self.children = children
+
+    def build(self, batch, parent):
+        self.pyg_grp = pyglet.graphics.Group(parent=parent)
+        for i, c in enumerate(self.children):
+            ordering = pyglet.graphics.OrderedGroup(i, parent=self.pyg_grp)
+            c.build(batch, ordering)
+        return self.pyg_grp
+
 class Color(SceneNode):
     def __init__(self, color, children):
         self.color = color
@@ -219,6 +214,7 @@ class CheckerTexture(SceneNode):
         self.pyg_grp = _PygCheckerTexture(parent=parent)
         self._build_children(batch)
         return self.pyg_grp
+
 
 #
 # these functions return 4x4 rotation matrix suitable to construct Transform
@@ -251,6 +247,53 @@ def rotx(theta):
     r[1:3,1:3] = _rot2d(theta)
     return r
 
+class _PygTransform(pyglet.graphics.Group):
+    def __init__(self, transform=np.eye(4), parent=None):
+        super().__init__(parent)
+        self.set_matrix(transform)
+
+    def set_matrix(self, transform):
+        assert transform.shape == (4, 4)
+        assert np.all(transform[3,:] == [0, 0, 0, 1])
+        self.matrix_raw = (GLfloat * 16)(*transform.T.flatten())
+
+    def set_state(self):
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glMultMatrixf(self.matrix_raw)
+
+    def unset_state(self):
+        glPopMatrix()
+
+class _PygColor(pyglet.graphics.Group):
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        if len(color) == 3:
+            self.set_rgb(*color)
+        else:
+            self.set_rgba(*color)
+
+    def set_rgb(self, r, g, b):
+        self.color = (r, g, b, 1)
+
+    def set_rgba(self, r, g, b, a):
+        self.color = (r, g, b, a)
+
+    def alpha(self):
+        return self.color[-1]
+
+    def set_state(self):
+        if self.alpha() < 1:
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, (GLfloat * 4)(*self.color))
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(*self.color))
+
+    def unset_state(self):
+        if self.alpha() < 1:
+            glDisable(GL_BLEND)
+
 class _PygCheckerTexture(pyglet.graphics.Group):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -281,23 +324,16 @@ class _PygCheckerTexture(pyglet.graphics.Group):
     def unset_state(self):
         glDisable(self.tex.target)
 
-class _PygColor(pyglet.graphics.Group):
-    def __init__(self, color, parent=None):
-        super().__init__(parent)
-        if len(color) == 3:
-            self.set_rgb(*color)
-        else:
-            self.set_rgba(*color)
-
-    def set_rgb(self, r, g, b):
-        self.color = (r, g, b, 1)
-
-    def set_rgba(self, r, g, b, a):
-        self.color = (r, g, b, a)
+class _PygAlphaBlending(pyglet.graphics.Group):
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
 
     def set_state(self):
-        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, (GLfloat * 4)(*self.color))
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(*self.color))
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+    def unset_state(self):
+        glDisable(GL_BLEND)
 
 Batch = pyglet.graphics.Batch
 
@@ -349,6 +385,17 @@ class TriStrip(BatchElement):
             ('n3f/static', list(normals.flatten()))
         ]
 
+class TriFan(BatchElement):
+    def __init__(self, verts, normals):
+        N, dim = verts.shape
+        assert dim == 3
+        assert normals.shape == verts.shape
+
+        self.batch_args = [N, pyglet.gl.GL_TRIANGLE_FAN, None,
+            ('v3f/static', list(verts.flatten())),
+            ('n3f/static', list(normals.flatten()))
+        ]
+
 # a box centered on the origin
 def box(x, y, z):
     v = box_mesh(x, y, z)
@@ -390,6 +437,10 @@ def rect(dim, srange=(0,1), trange=(0,1)):
         [s0, t1], [s0, t0], [s1, t0]])
     return Mesh(v, n, st)
 
+def circle(radius, facets):
+    v, n = circle_fan(radius, facets)
+    return TriFan(v, n)
+
 #
 # low-level primitive builders. return vertex/normal/texcoord arrays.
 # good if you want to apply transforms directly to the points, etc.
@@ -406,6 +457,16 @@ def box_mesh(x, y, z):
     t = t.flatten()
     v = v[t,:]
     return v
+
+# circle in the x-y plane
+def circle_fan(radius, sections):
+    t = np.linspace(0, 2 * np.pi, sections + 1)[:,None]
+    x = radius * np.cos(t)
+    y = radius * np.sin(t)
+    v = np.hstack([x, y, 0*t])
+    v = np.vstack([[0, 0, 0], v])
+    n = _withz(0 * v, 1)
+    return v, n
 
 # cylinder sitting on the x-y plane
 def cylinder_strip(radius, height, sections):
