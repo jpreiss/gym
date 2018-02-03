@@ -1,11 +1,13 @@
 import numpy as np
 from gym import utils
 from gym.envs.mujoco import mujoco_env
+from gym.envs.mujoco.reacher_xml import ReacherXML
 
 class ReacherEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self):
         utils.EzPickle.__init__(self)
         mujoco_env.MujocoEnv.__init__(self, 'reacher.xml', 2)
+        self.xml_randomizer = ReacherXML()
 
     def _step(self, a):
         vec = self.get_body_com("fingertip")-self.get_body_com("target")
@@ -21,10 +23,18 @@ class ReacherEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self.viewer.cam.trackbodyid = 0
 
     def reset_model(self):
+        self.xml_randomizer.randomize(self.np_random)
+        mujoco_env.MujocoEnv.__init__(self, 
+            'reacher_randomized.xml', 2, clear_viewer=False)
+        if self.viewer is not None:
+            self.viewer.set_model(self.model)
+            self.viewer_setup()
         qpos = self.np_random.uniform(low=-0.1, high=0.1, size=self.model.nq) + self.init_qpos
+        lo, hi = self.xml_randomizer.min_rad, self.xml_randomizer.max_rad
         while True:
-            self.goal = self.np_random.uniform(low=-.2, high=.2, size=2)
-            if np.linalg.norm(self.goal) < 2:
+            self.goal = self.np_random.uniform(-hi, hi, size=2)
+            dist = np.linalg.norm(self.goal)
+            if lo < dist and dist < hi:
                 break
         qpos[-2:] = self.goal
         qvel = self.init_qvel + self.np_random.uniform(low=-.005, high=.005, size=self.model.nv)

@@ -17,7 +17,7 @@ class MujocoEnv(gym.Env):
     """Superclass for all MuJoCo environments.
     """
 
-    def __init__(self, model_path, frame_skip):
+    def __init__(self, model_path, frame_skip, clear_viewer=True):
         if model_path.startswith("/"):
             fullpath = model_path
         else:
@@ -27,7 +27,8 @@ class MujocoEnv(gym.Env):
         self.frame_skip = frame_skip
         self.model = mujoco_py.MjModel(fullpath)
         self.data = self.model.data
-        self.viewer = None
+        if clear_viewer:
+            self.viewer = None
 
         self.metadata = {
             'render.modes': ['human', 'rgb_array'],
