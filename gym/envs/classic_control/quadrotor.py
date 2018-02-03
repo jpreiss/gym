@@ -58,6 +58,9 @@ def normalize(x):
         return x, 0
     return x / n, n
 
+def norm2(x):
+    return np.sum(x ** 2)
+
 # gram-schmidt orthogonalization
 def orth_cols(m):
     assert len(m.shape) == 2
@@ -154,7 +157,7 @@ class QuadrotorDynamics(object):
         assert np.all(thrust_cmds <= 1)
         thrusts = self.thrust * thrust_cmds
         thrust = npa(0,0,np.sum(thrusts))
-        torques = np.cross(self.prop_pos, npa(0,0,1)) * thrusts[:,None]
+        torques = np.cross(self.prop_pos, [0, 0, 1]) * thrusts[:,None]
         torques[:,2] += self.torque * self.prop_ccw * thrust_cmds
         torque = np.sum(torques, axis=0)
 
@@ -173,8 +176,7 @@ class QuadrotorDynamics(object):
         self.rot = orth_cols(rot)
 
         # translational dynamics
-        g = npa(0, 0, -GRAV)
-        acc = g + (1.0 / self.mass) * np.matmul(self.rot, thrust)
+        acc = [0, 0, -GRAV] + (1.0 / self.mass) * np.matmul(self.rot, thrust)
         self.vel = vel_damp * self.vel + dt * acc
         self.pos = self.pos + dt * self.vel
 
@@ -187,7 +189,7 @@ class ChaseCamera(object):
         self.pos_smooth = pos
         self.vel_smooth = vel
         if norm(vel) > 0.1:
-            self.right_smooth, _ = normalize(np.cross(vel, npa(0, 0, 1)))
+            self.right_smooth, _ = normalize(np.cross(vel, [0, 0, 1]))
         else:
             self.right_smooth = npa(1, 0, 0)
         self.view_dist = 4
@@ -287,24 +289,26 @@ class QuadrotorEnv(gym.Env):
 
         vel = self.dynamics.vel
         to_goal = -self.dynamics.pos
+
+        # note we don't want to penalize distance^2 because in harder instances
+        # the initial distance can be very far away
+        loss_pos = norm(to_goal)
+
+        # penalize velocity away from goal but not towards
         loss_vel_away = 0.1 * (norm(vel) * norm(to_goal) - np.dot(vel, to_goal))
 
-        dist = norm(self.goal - self.dynamics.pos)**2
-        loss_pos = dist
-        # only penalize velocity when near goal
-        #loss_vel = 1.0 * norm(self.dynamics.vel) * np.exp(-dist**2)
+        # penalize altitude above this threshold
+        max_alt = 3.0
         loss_alt = 2 * hinge_loss(self.dynamics.pos[2], 3) ** 2
-        # roll/pitch not a big deal, yaw bad
-        loss_spin = 0.02 * np.sum(np.abs(npa(1,1,10)*self.dynamics.omega))
-        loss_crash = 50 * self.dynamics.crashed
-        loss_battery = 0.02 * np.sum(action**2)
 
-        goal_thresh = 4.0 # within this distance, start rewarding
-        goal_max = loss_crash # max reward when exactly at goal
+        loss_spin = 0.02 * norm2([1, 1, 10] * self.dynamics.omega)
+        loss_crash = 50 * self.dynamics.crashed
+        loss_battery = 0.02 * norm2(action)
+
+        goal_thresh = 1.0 # within this distance, start rewarding
+        goal_max = 0 # max reward when exactly at goal
         a = -goal_max / (goal_thresh**2)
-        reward_goal = max(0,  a * dist**2 + goal_max)
-        if dist > goal_thresh + 0.001:
-            assert reward_goal == 0
+        reward_goal = max(0,  a * norm2(to_goal) + goal_max)
 
         #row = ['goal', 'pos', 'alt', 'vel', 'omega', 'action', 'crash']
         self.loss_integral += self.dt * np.array([-reward_goal, loss_pos, loss_alt,
@@ -332,7 +336,8 @@ class QuadrotorEnv(gym.Env):
         self.lifetime_pos_smooth += (1.0 - alpha) * self.loss_integral[0]
 
         x, y = self.np_random.uniform(-self.box, self.box, size=(2,))
-        self.box *= 1.0003 # x20 after 10000 episodes
+        if self.box < 20:
+            self.box *= 1.0003 # x20 after 10000 resets
         print("box:", self.box)
         #x, y = 20, 0
         z = self.np_random.uniform(1, 3)
