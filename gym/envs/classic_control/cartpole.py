@@ -10,6 +10,8 @@ import gym
 from gym import spaces
 from gym.utils import seeding
 import numpy as np
+import traceback
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +31,16 @@ class CartPoleEnv(gym.Env):
         self.force_mag = 10.0
         self.tau = 0.02  # seconds between state updates
 
-        # Angle at which to fail the episode
-        self.theta_threshold_radians = 12 * 2 * math.pi / 360
         self.x_threshold = 2.4
+
+        self.ep_len = 256
+        self.tick = 0
 
         # Angle limit set to 2 * theta_threshold_radians so failing observation is still within bounds
         high = np.array([
             self.x_threshold * 2,
             np.finfo(np.float32).max,
-            self.theta_threshold_radians * 2,
+            100,
             np.finfo(np.float32).max])
 
         self.action_space = spaces.Discrete(2)
@@ -64,32 +67,28 @@ class CartPoleEnv(gym.Env):
         thetaacc = (self.gravity * sintheta - costheta* temp) / (self.length * (4.0/3.0 - self.masspole * costheta * costheta / self.total_mass))
         xacc  = temp - self.polemass_length * thetaacc * costheta / self.total_mass
         x  = x + self.tau * x_dot
-        x_dot = x_dot + self.tau * xacc
+        x_dot = 0.995 * x_dot + self.tau * xacc
         theta = theta + self.tau * theta_dot
-        theta_dot = theta_dot + self.tau * thetaacc
+        theta_dot = 0.995 * theta_dot + self.tau * thetaacc
         self.state = (x,x_dot,theta,theta_dot)
-        done =  x < -self.x_threshold \
-                or x > self.x_threshold \
-                or theta < -self.theta_threshold_radians \
-                or theta > self.theta_threshold_radians
-        done = bool(done)
 
-        if not done:
-            reward = 1.0
-        elif self.steps_beyond_done is None:
-            # Pole just fell!
-            self.steps_beyond_done = 0
-            reward = 1.0
-        else:
-            if self.steps_beyond_done == 0:
-                logger.warning("You are calling 'step()' even though this environment has already returned done = True. You should always call 'reset()' once you receive 'done = True' -- any further steps are undefined behavior.")
-            self.steps_beyond_done += 1
-            reward = 0.0
+        theta_wrap = (theta + np.pi) % (2 * np.pi) - np.pi
+        vel_rew = - 0.05 * np.abs(theta_dot) - 0.02 * np.abs(x_dot)
+        pos_rew = -(1.0/np.pi) * np.abs(theta_wrap) - 0.05*np.abs(x)
+        reward = -100 * (np.abs(x) > self.x_threshold) + pos_rew + vel_rew
+
+        self.tick += 1
+        done = False
+        if self.tick >= self.ep_len:
+            done = True
 
         return np.array(self.state), reward, done, {}
 
+
     def _reset(self):
+        self.tick = 0
         self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
+        self.state[2] += np.pi #theta
         self.steps_beyond_done = None
         return np.array(self.state)
 
