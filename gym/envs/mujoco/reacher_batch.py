@@ -5,6 +5,7 @@ from gym.envs.mujoco.reacher_xml import ReacherXML
 
 class ReacherBatchEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self):
+        self.batch = False
         self.N = 1
         self.sysid_dim = 4
         utils.EzPickle.__init__(self)
@@ -14,7 +15,8 @@ class ReacherBatchEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self.sample_sysid()
 
     def sysid_values(self):
-        return self.xml_randomizer.sysid_values()[None,:]
+        vals = self.xml_randomizer.sysid_values()
+        return vals[None,:] if self.batch else vals
 
     def _step(self, a):
         vec = self.get_body_com("fingertip")-self.get_body_com("target")
@@ -54,17 +56,19 @@ class ReacherBatchEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self.xml_randomizer.randomize(self.np_random)
         path = self.xml_randomizer.get_path()
         mujoco_env.MujocoEnv.__init__(self, path, 2, clear_viewer=False)
+        print("randomized: new sysid", self.xml_randomizer.sysid_values())
         if self.viewer is not None:
             self.viewer.set_model(self.model)
             self.viewer_setup()
 
     def _get_obs(self):
         theta = self.model.data.qpos.flat[:2]
-        return np.concatenate([
+        vals = np.concatenate([
             np.cos(theta),
             np.sin(theta),
             self.model.data.qpos.flat[2:],
             self.model.data.qvel.flat[:2],
             self.get_body_com("fingertip") - self.get_body_com("target"),
             self.sysid_values().flatten()
-        ])[None,:]
+        ])
+        return vals[None,:] if self.batch else vals

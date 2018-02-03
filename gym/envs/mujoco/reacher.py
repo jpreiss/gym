@@ -24,8 +24,8 @@ class ReacherEnv(mujoco_env.MujocoEnv, utils.EzPickle):
 
     def reset_model(self):
         self.xml_randomizer.randomize(self.np_random)
-        mujoco_env.MujocoEnv.__init__(self, 
-            'reacher_randomized.xml', 2, clear_viewer=False)
+        path = self.xml_randomizer.write_path
+        mujoco_env.MujocoEnv.__init__(self, path, 2, clear_viewer=False)
         if self.viewer is not None:
             self.viewer.set_model(self.model)
             self.viewer_setup()
