@@ -1,74 +1,106 @@
 import numpy as np
+import gym
+from copy import deepcopy
 from gym import utils
-from gym.envs.mujoco import mujoco_env
+from gym.envs.mujoco import ReacherEnv
 from gym.envs.mujoco.reacher_xml import ReacherXML
 
-class ReacherBatchEnv(mujoco_env.MujocoEnv, utils.EzPickle):
-    def __init__(self):
-        self.batch = False
-        self.N = 1
+N_RAND = 1000
+
+def expand_obs_by(obs, n):
+    infs = np.full(n, np.inf)
+    low = np.concatenate([obs.low, -infs])
+    high = np.concatenate([obs.high, infs])
+    return gym.spaces.Box(low, high)
+
+class ReacherBatchEnv(gym.Env):
+
+    def __init__(self, N=1):
+        self.N = N
         self.sysid_dim = 4
-        utils.EzPickle.__init__(self)
         self.tick = 0
-        self.xml_randomizer = ReacherXML()
-        mujoco_env.MujocoEnv.__init__(self, 'reacher.xml', 2)
+        self._seed()
+
+        # construct a bunch of randomized models
+        envs_all = []
+        sysid_vecs = []
+        xr = ReacherXML()
+        for i in range(N_RAND):
+            xr.randomize(self.np_random)
+            env = ReacherEnv(model_path=xr.get_path(),
+                min_radius=xr.min_rad, max_radius=xr.max_rad)
+            env.original_index = i
+            envs_all.append(env)
+            sysid_vecs.append(xr.sysid_values()[None,:])
+
+        self.envs_all = np.array(envs_all)
+        self.sysid_all = np.concatenate(sysid_vecs, 0)
+        print("sysid_vecs[0].shape:", sysid_vecs[0].shape)
+        print("sysid_all.shape:", self.sysid_all.shape)
+        assert self.sysid_all.shape == (N_RAND, self.sysid_dim)
+
+        env0 = self.envs_all[0]
+        self.action_space = env0.action_space
+        self.observation_space = expand_obs_by(
+            env0.observation_space, self.sysid_dim)
+        self.envs = None
         self.sample_sysid()
 
-    def sysid_values(self):
-        vals = self.xml_randomizer.sysid_values()
-        return vals[None,:] if self.batch else vals
+        # rendering stuff
+        self.metadata = deepcopy(env0.metadata)
 
-    def _step(self, a):
-        vec = self.get_body_com("fingertip")-self.get_body_com("target")
-        reward_dist = - np.linalg.norm(vec)
-        reward_ctrl = - np.square(a).sum()
-        reward = reward_dist + 1.00 * reward_ctrl
-        self.do_simulation(a, self.frame_skip)
-        ob = self._get_obs()
-        self.tick += 1
-        done = self.tick >= 64
-        if done:
-            self.reset()
-        return ob, reward, done, dict(reward_dist=reward_dist, reward_ctrl=reward_ctrl)
-
-    def viewer_setup(self):
-        self.viewer.cam.trackbodyid = 0
-
-    def reset_model(self):
-        self.tick = 0
-        qpos = self.np_random.uniform(low=-0.1, high=0.1, size=self.model.nq) + self.init_qpos
-        lo, hi = self.xml_randomizer.min_rad, self.xml_randomizer.max_rad
-        while True:
-            self.goal = self.np_random.uniform(-hi, hi, size=2)
-            dist = np.linalg.norm(self.goal)
-            if lo < dist and dist < hi:
-                break
-        qpos[-2:] = self.goal
-        qvel = self.init_qvel + self.np_random.uniform(low=-.005, high=.005, size=self.model.nv)
-        qvel[-2:] = 0
-        self.set_state(qpos, qvel)
-        return self._get_obs()
+    def _seed(self, seed=None):
+        self.np_random, seed = gym.utils.seeding.np_random(seed)
+        return [seed]
 
     def sample_sysid(self):
-        if self.tick != 0:
-            print("sampling sysid with tick =", self.tick)
-            assert False
-        self.xml_randomizer.randomize(self.np_random)
-        path = self.xml_randomizer.get_path()
-        mujoco_env.MujocoEnv.__init__(self, path, 2, clear_viewer=False)
-        print("randomized: new sysid", self.xml_randomizer.sysid_values())
-        if self.viewer is not None:
-            self.viewer.set_model(self.model)
-            self.viewer_setup()
+        prev_env0 = None
+        if self.envs is not None:
+            prev_env0 = self.envs[0]
+        selection = self.np_random.choice(N_RAND, self.N)
+        self.envs = self.envs_all[selection]
+        self.sysid = self.sysid_all[selection,:]
+        assert self.sysid.shape == (self.N, self.sysid_dim)
+        if prev_env0 is not None and prev_env0.viewer is not None:
+            self.envs[0]._take_viewer(prev_env0)
+
+    def sysid_values(self):
+        return deepcopy(self.sysid)
+
+    def _step(self, a):
+        #print("acs:", a)
+        #a[a > 1] = 1
+        #a[a < -1] = -1
+        obs = np.zeros((self.N, self.envs[0].obs_dim))
+        rewards = np.zeros(self.N)
+        # TODO merge reward dicts
+        for i in range(self.N):
+            ob, reward, done, rew_dict = self.envs[i]._step(a[i,:])
+            obs[i,:] = ob
+            rewards[i] = reward
+
+        self.tick += 1
+        done = self.tick >= 50
+        dones = np.full(self.N, done)
+        if done:
+            self.tick = 0
+            for env in self.envs:
+                env.reset()
+
+        obs = np.concatenate([obs, self.sysid], axis=1)
+
+        return obs, rewards, dones, None
+
+    def _render(self, mode='human', close=False):
+        self.envs[0].render(mode=mode, close=close)
+
+    def _reset(self):
+        for env in self.envs:
+            env.reset()
+        return self._get_obs()
 
     def _get_obs(self):
-        theta = self.model.data.qpos.flat[:2]
-        vals = np.concatenate([
-            np.cos(theta),
-            np.sin(theta),
-            self.model.data.qpos.flat[2:],
-            self.model.data.qvel.flat[:2],
-            self.get_body_com("fingertip") - self.get_body_com("target"),
-            self.sysid_values().flatten()
-        ])
-        return vals[None,:] if self.batch else vals
+        obs = np.zeros((self.N, self.envs[0].obs_dim))
+        for i in range(self.N):
+            obs[i,:] = self.envs[i]._get_obs()
+        return np.concatenate([obs, self.sysid], 1)

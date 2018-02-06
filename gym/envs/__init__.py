@@ -232,6 +232,13 @@ register(
 # 2D
 
 register(
+    id='Reacher-Old-v1',
+    entry_point='gym.envs.mujoco:ReacherOldEnv',
+    max_episode_steps=50,
+    reward_threshold=-3.75,
+)
+
+register(
     id='Reacher-v1',
     entry_point='gym.envs.mujoco:ReacherEnv',
     max_episode_steps=50,
