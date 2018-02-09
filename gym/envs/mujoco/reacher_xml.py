@@ -3,7 +3,7 @@ import numpy as np
 import tempfile
 import os
 
-RATIO = 1.5
+RATIO = 2.0
 MIN_LEN = 0.1 / RATIO
 MAX_LEN = 0.1 * RATIO
 MIN_FORCE = 1.0

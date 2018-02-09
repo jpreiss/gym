@@ -6,6 +6,10 @@ class ReacherEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def __init__(self, model_path='reacher.xml', min_radius=0.0, max_radius=0.2):
         self.min_radius = min_radius
         self.max_radius = max_radius
+        # penalize control effort less when links are heavier
+        # TODO: deal with this by changing actuator strength to match links
+        # in mj model, and normalize control range to [-1, 1]
+        self.ctrl_penalty_scale = (0.2 / max_radius) ** 2
         utils.EzPickle.__init__(self)
         mujoco_env.MujocoEnv.__init__(self, model_path, 2)
 
@@ -13,7 +17,7 @@ class ReacherEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         vec = self.get_body_com("fingertip")-self.get_body_com("target")
         reward_dist = - np.linalg.norm(vec)
         reward_vel = - 0.0010 * np.square(self.model.data.qvel.flat[:2]).sum()
-        reward_ctrl = - np.square(a).sum()
+        reward_ctrl = - self.ctrl_penalty_scale * np.square(a).sum()
         reward = reward_dist + reward_vel + reward_ctrl
         self.do_simulation(a, self.frame_skip)
         ob = self._get_obs()
@@ -24,14 +28,15 @@ class ReacherEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self.viewer.cam.trackbodyid = 0
 
     def reset_model(self):
-        qpos = self.np_random.uniform(low=-1.0, high=1.0, size=self.model.nq) + self.init_qpos
-        while True:
-            self.goal = self.np_random.uniform(low=-self.max_radius, high=self.max_radius, size=2)
-            dist = np.linalg.norm(self.goal)
-            if self.min_radius < dist and dist < self.max_radius:
-                break
-        #self.goal = np.array([-0.1, 0.1])
-        qpos[-2:] = self.goal
+        # don't want very tight initial angle on elbow
+        joint_angles = self.np_random.uniform(low=[-np.pi, -2.0], high=[np.pi, 2.0]) + self.init_qpos[:2]
+
+        # goal slides along y-axis - i.e. fixing coord system rotation wrt goal
+        minr = max(self.min_radius, 0.05)
+        gy = self.np_random.uniform(low=minr, high=self.max_radius)
+        self.goal = np.array([0, gy])
+
+        qpos = np.concatenate([joint_angles, self.goal])
         qvel = self.init_qvel + self.np_random.uniform(low=-.005, high=.005, size=self.model.nv)
         qvel[-2:] = 0
         self.set_state(qpos, qvel)
