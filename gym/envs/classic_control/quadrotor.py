@@ -1,7 +1,5 @@
 """
-Classic cart-pole system implemented by Rich Sutton et al.
-Copied from http://incompleteideas.net/sutton/book/code/pole.c
-permalink: https://perma.cc/C9ZM-652R
+3D quadrotor environment.
 """
 
 import logging
@@ -188,10 +186,7 @@ class ChaseCamera(object):
     def __init__(self, pos=npa(0,0,0), vel=npa(0,0,0)):
         self.pos_smooth = pos
         self.vel_smooth = vel
-        if norm(vel) > 0.1:
-            self.right_smooth, _ = normalize(np.cross(vel, [0, 0, 1]))
-        else:
-            self.right_smooth = npa(1, 0, 0)
+        self.right_smooth, _ = normalize(np.cross(vel, npa(0, 0, 1)))
         self.view_dist = 4
 
     def step(self, pos, vel):
@@ -202,12 +197,15 @@ class ChaseCamera(object):
         self.pos_smooth = ap * self.pos_smooth + (1 - ap) * pos
         self.vel_smooth = av * self.vel_smooth + (1 - av) * vel
 
-        # if we are far from the goal, look towards goal.
-        # if we are close, just stop moving the camera.
-        xydist = norm(self.pos_smooth[:2])
-        if xydist >= 1:
-            right, _ = normalize(np.cross(-self.pos_smooth, [0, 0, 1]))
-            self.right_smooth = ar * self.right_smooth + (1 - ar) * right
+        veln, n = normalize(self.vel_smooth)
+        up = npa(0, 0, 1)
+        ideal_vel, _ = normalize(-self.pos_smooth)
+        if True or np.abs(veln[2]) > 0.95 or n < 0.01 or np.dot(veln, ideal_vel) < 0.7:
+            # look towards goal even though we are not heading there
+            right, _ = normalize(np.cross(ideal_vel, up))
+        else:
+            right, _ = normalize(np.cross(veln, up))
+        self.right_smooth = ar * self.right_smooth + (1 - ar) * right
 
     # return eye, center, up suitable for gluLookAt
     def look_at(self):
