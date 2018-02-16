@@ -59,20 +59,9 @@ def normalize(x):
 def norm2(x):
     return np.sum(x ** 2)
 
-# gram-schmidt orthogonalization
 def orth_cols(m):
-    assert len(m.shape) == 2
-    _, nc = m.shape
-    m[:,0] = m[:,0] / norm(m[:,0])
-    for i in range(1, nc):
-        c = m[:,i]
-        left = m[:,:i]
-        proj = np.matmul(left.T, c)
-        c = c - np.matmul(left, proj)
-        clen = norm(c)
-        assert clen > 0.95
-        m[:,i] = c / clen
-    return m
+    u, s, v = np.linalg.svd(m)
+    return np.matmul(u, v)
 
 def rand_uniform_rot3d(np_random):
     randunit = lambda: normalize(np_random.normal(size=(3,)))[0]
