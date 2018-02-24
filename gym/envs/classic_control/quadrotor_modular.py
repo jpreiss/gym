@@ -138,9 +138,10 @@ class QuadrotorDynamics(object):
 
     # return eye, center, up suitable for gluLookAt representing onboard camera
     def look_at(self):
-        eye = self.pos
         degrees_down = 45.0
         R = self.rot
+        # camera slightly below COM
+        eye = self.pos + np.matmul(R, [0, 0, -0.02])
         theta = np.radians(degrees_down)
         to, _ = normalize(np.cos(theta) * R[:,0] - np.sin(theta) * R[:,2])
         center = eye + to
@@ -224,72 +225,6 @@ def goal_seeking_reward(dynamics, goal, action, dt):
     return reward
 
 
-class Quadrotor3DScene(object):
-    def __init__(self, goal, dynamics, w, h, resizable):
-        self.viewer = r3d.Viewer(w, h, resizable=resizable)
-
-        diameter = 2 * dynamics.arm
-        self.quad_transform = Quadrotor3DScene._quadrotor_3dmodel(diameter)
-
-        self.shadow_transform = r3d.transform_and_color(
-            np.eye(4), (0, 0, 0, 0.4), r3d.circle(0.75*diameter, 32))
-
-        floor = r3d.CheckerTexture(
-            r3d.rect((1000, 1000), (0, 100), (0, 100)))
-
-        goal = r3d.transform_and_color(r3d.translate(goal),
-            (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
-
-        world = r3d.BackToFront([
-            floor, self.shadow_transform, goal, self.quad_transform])
-        batch = r3d.Batch()
-        world.build(batch, None)
-        self.viewer.add_batch(batch)
-
-    def _quadrotor_3dmodel(diam):
-        r = diam / 2
-        prop_r = 0.3 * diam
-        prop_h = prop_r / 15.0
-
-        # "X" propeller configuration, start fwd left, go clockwise
-        rr = r * np.sqrt(2)/2
-        deltas = ((rr, rr, 0), (rr, -rr, 0), (-rr, -rr, 0), (-rr, rr, 0))
-        colors = ((1,0,0), (1,0,0), (0,1,0), (0,1,0))
-        def disc(translation, color):
-            color = 0.3 * np.array(list(color)) + 0.2
-            disc = r3d.transform_and_color(r3d.translate(translation), color,
-                r3d.cylinder(prop_r, prop_h, 32))
-            return disc
-        props = [disc(d, c) for d, c in zip(deltas, colors)]
-
-        arm_thicc = diam / 20.0
-        arm_color = (0.5, 0.5, 0.5)
-        arms = r3d.transform_and_color(
-            np.matmul(r3d.translate((0, 0, -arm_thicc)), r3d.rotz(np.pi / 4)), arm_color,
-            [r3d.box(diam/10, diam, arm_thicc), r3d.box(diam, diam/10, arm_thicc)])
-
-        arrow = r3d.Color((0.3, 0.3, 1.0), r3d.arrow(0.12*prop_r, 2.5*prop_r, 16))
-
-        bodies = props + [arms, arrow]
-        return r3d.Transform(np.eye(4), bodies)
-
-    def update_state(self, dynamics):
-        matrix = r3d.trans_and_rot(dynamics.pos, dynamics.rot)
-        self.quad_transform.set_transform(matrix)
-
-        shadow_pos = 0 + dynamics.pos
-        shadow_pos[2] = 0.001 # avoid z-fighting
-        matrix = r3d.translate(shadow_pos)
-        self.shadow_transform.set_transform(matrix)
-
-        #eye, center, up = self.camera.look_at()
-        eye, center, up = dynamics.look_at()
-        self.viewer.look_at(eye, center, up)
-
-    def render(self, return_rgb_array):
-        return self.viewer.render(return_rgb_array=return_rgb_array)
-
-
 class ChaseCamera(object):
     def __init__(self, pos=npa(0,0,0), vel=npa(0,0,0)):
         self.pos_smooth = pos
@@ -325,6 +260,77 @@ class ChaseCamera(object):
         return eye, center, up
 
 
+class Quadrotor3DScene(object):
+    def __init__(self, goal, dynamics, w, h, resizable):
+        self.viewer = r3d.Viewer(w, h, resizable=resizable)
+        self.chase_cam = ChaseCamera(dynamics.pos, dynamics.vel)
+
+        diameter = 2 * dynamics.arm
+        self.quad_transform = self._quadrotor_3dmodel(diameter)
+
+        self.shadow_transform = r3d.transform_and_color(
+            np.eye(4), (0, 0, 0, 0.4), r3d.circle(0.75*diameter, 32))
+
+        floor = r3d.CheckerTexture(
+            r3d.rect((1000, 1000), (0, 100), (0, 100)))
+
+        goal = r3d.transform_and_color(r3d.translate(goal),
+            (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
+
+        world = r3d.BackToFront([
+            floor, self.shadow_transform, goal, self.quad_transform])
+        batch = r3d.Batch()
+        world.build(batch, None)
+        self.viewer.add_batch(batch)
+
+    def _quadrotor_3dmodel(self, diam):
+        r = diam / 2
+        prop_r = 0.3 * diam
+        prop_h = prop_r / 15.0
+
+        # "X" propeller configuration, start fwd left, go clockwise
+        rr = r * np.sqrt(2)/2
+        deltas = ((rr, rr, 0), (rr, -rr, 0), (-rr, -rr, 0), (-rr, rr, 0))
+        colors = ((1,0,0), (1,0,0), (0,1,0), (0,1,0))
+        def disc(translation, color):
+            color = 0.3 * np.array(list(color)) + 0.2
+            disc = r3d.transform_and_color(r3d.translate(translation), color,
+                r3d.cylinder(prop_r, prop_h, 32))
+            return disc
+        props = [disc(d, c) for d, c in zip(deltas, colors)]
+
+        arm_thicc = diam / 20.0
+        arm_color = (0.5, 0.5, 0.5)
+        arms = r3d.transform_and_color(
+            np.matmul(r3d.translate((0, 0, -arm_thicc)), r3d.rotz(np.pi / 4)), arm_color,
+            [r3d.box(diam/10, diam, arm_thicc), r3d.box(diam, diam/10, arm_thicc)])
+
+        arrow = r3d.Color((0.3, 0.3, 1.0), r3d.arrow(0.12*prop_r, 2.5*prop_r, 16))
+
+        bodies = props + [arms, arrow]
+        return r3d.Transform(np.eye(4), bodies)
+
+    def update_state(self, dynamics):
+        matrix = r3d.trans_and_rot(dynamics.pos, dynamics.rot)
+        self.quad_transform.set_transform(matrix)
+        self.firstperson_lookat = dynamics.look_at()
+        shadow_pos = 0 + dynamics.pos
+        shadow_pos[2] = 0.001 # avoid z-fighting
+        matrix = r3d.translate(shadow_pos)
+        self.shadow_transform.set_transform(matrix)
+
+    def render_chase(self, return_rgb_array):
+        eye, center, up = self.chase_cam.look_at()
+        self.viewer.set_fov(45)
+        self.viewer.look_at(eye, center, up)
+        return self.viewer.render(return_rgb_array=return_rgb_array)
+
+    def render_firstperson(self, return_rgb_array):
+        self.viewer.set_fov(90)
+        self.viewer.look_at(*self.firstperson_lookat)
+        return self.viewer.render(return_rgb_array=return_rgb_array)
+
+
 class QuadrotorEnv(gym.Env):
     metadata = {
         'render.modes': ['human', 'rgb_array'],
@@ -336,7 +342,6 @@ class QuadrotorEnv(gym.Env):
         self.dynamics = default_dynamics()
         self.controller = ShiftedMotorControl(self.dynamics)
         self.action_space = self.controller.action_space(self.dynamics)
-        self.chase_cam = None
         self.scene = None
 
         # pos, vel, rot, omega
@@ -352,6 +357,8 @@ class QuadrotorEnv(gym.Env):
         self.tick = 0
         self.dt = 1.0 / 50.0
 
+        self._seed()
+
         # size of the box from which initial position will be randomly sampled
         # grows a little with each episode
         self.box = 1.0
@@ -365,13 +372,16 @@ class QuadrotorEnv(gym.Env):
         reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
         self.tick += 1
         done = self.tick > self.ep_len
-        self.chase_cam.step(self.dynamics.pos, self.dynamics.vel)
+        if self.scene is not None:
+            self.scene.chase_cam.step(self.dynamics.pos, self.dynamics.vel)
         sv = self.dynamics.state_vector()
         return sv, reward, done, {}
 
     def _reset(self):
         self.goal = npa(0, 0, 2)
         x, y = self.np_random.uniform(-self.box, self.box, size=(2,))
+        x = -abs(x)
+        y = 0
         if self.box < 20:
             self.box *= 1.0003 # x20 after 10000 resets
         z = self.np_random.uniform(1, 3)
@@ -391,4 +401,4 @@ class QuadrotorEnv(gym.Env):
                 640, 480, resizable=True)
             self.chase_cam = ChaseCamera(self.dynamics.pos, self.dynamics.vel)
         self.scene.update_state(self.dynamics)
-        return self.scene.render(return_rgb_array=(mode == 'rgb_array'))
+        return self.scene.render_firstperson(return_rgb_array=(mode == 'rgb_array'))

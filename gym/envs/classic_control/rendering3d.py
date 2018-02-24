@@ -72,7 +72,9 @@ class Viewer(object):
     def set_bgcolor(self, r, g, b):
         glClearColor(r, g, b, 1.0)
 
-    def set_fov(self):
+    def set_fov(self, fov=None):
+        if fov is not None:
+            self.fov = fov
         aspect = float(self.window.width) / self.window.height
         znear = 0.1
         zfar = 100.0
