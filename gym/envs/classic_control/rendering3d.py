@@ -48,16 +48,17 @@ class Viewer(object):
     # public interface
     #
 
-    def __init__(self, width, height, display=None):
+    def __init__(self, width, height, display=None, resizable=True):
 
         self.fov = 45
 
         display = get_display(display)
         self.window = pyglet.window.Window(display=display,
-            width=width, height=height, resizable=True
+            width=width, height=height, resizable=resizable
         )
 
-        self.window.on_resize = self._gl_setup
+        if resizable:
+            self.window.on_resize = self._gl_setup
         self.window.on_close = self.window_closed_by_user
         self.batches = []
 
