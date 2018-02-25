@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 
 try:
     import pyglet
+    pyglet.options['debug_gl'] = False
 except ImportError as e:
     reraise(suffix="HINT: you can install pyglet directly via 'pip install pyglet'. But if you really just want to install all Gym dependencies and not have to think about it, 'pip install -e .[all]' or 'pip install gym[all]' will do it.")
 
@@ -48,13 +49,17 @@ class Viewer(object):
     # public interface
     #
 
-    def __init__(self, width, height, display=None, resizable=True):
+    def __init__(self, width, height, display=None, resizable=True, visible=True):
 
         self.fov = 45
+        self.visible = visible
+
+        config=Config(double_buffer=visible)
 
         display = get_display(display)
         self.window = pyglet.window.Window(display=display,
-            width=width, height=height, resizable=resizable
+            width=width, height=height, resizable=resizable,
+            visible=visible, vsync=visible, config=config
         )
 
         if resizable:
@@ -70,9 +75,11 @@ class Viewer(object):
         self.window.close()
 
     def set_bgcolor(self, r, g, b):
+        self.window.switch_to()
         glClearColor(r, g, b, 1.0)
 
     def set_fov(self, fov=None):
+        self.window.switch_to()
         if fov is not None:
             self.fov = fov
         aspect = float(self.window.width) / self.window.height
@@ -83,6 +90,7 @@ class Viewer(object):
         gluPerspective(self.fov, aspect, znear, zfar)
 
     def look_at(self, eye, target, up):
+        self.window.switch_to()
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         eye, target, up = list(eye), list(target), list(up)
@@ -93,7 +101,8 @@ class Viewer(object):
 
     def render(self, return_rgb_array=False):
         self.window.switch_to()
-        self.window.dispatch_events()
+        if self.visible:
+            self.window.dispatch_events()
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         for batch in self.batches:
@@ -112,11 +121,14 @@ class Viewer(object):
             # than the requested one.
             arr = arr.reshape(buffer.height, buffer.width, 4)
             arr = arr[::-1,:,0:3]
-        self.window.flip()
-        self.onetime_geoms = []
+
+        if self.visible:
+            self.window.flip()
+
         return arr
 
     def get_array(self):
+        self.window.switch_to()
         self.window.flip()
         image_data = pyglet.image.get_buffer_manager().get_color_buffer().get_image_data()
         self.window.flip()
@@ -130,6 +142,7 @@ class Viewer(object):
 
     # called on window resize
     def _gl_setup(self, width, height):
+        self.window.switch_to()
         glViewport(0, 0, width, height)
         glFrontFace(GL_CCW)
         glEnable(GL_DEPTH_TEST)
@@ -137,6 +150,7 @@ class Viewer(object):
 
     # should only be called once
     def _light_setup(self):
+        self.window.switch_to()
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
         glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(40.0, 100.0, 60.0, 1))

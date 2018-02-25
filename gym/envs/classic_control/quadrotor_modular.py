@@ -82,6 +82,8 @@ class QuadrotorDynamics(object):
         assert is_orthonormal(rotation)
         self.pos = deepcopy(position)
         self.vel = deepcopy(velocity)
+        self.acc = np.zeros(3)
+        self.accelerometer = np.array([0, 0, GRAV])
         self.rot = deepcopy(rotation)
         self.omega = deepcopy(omega)
         self.thrusts = deepcopy(thrusts)
@@ -133,8 +135,11 @@ class QuadrotorDynamics(object):
 
         # translational dynamics
         acc = [0, 0, -GRAV] + (1.0 / self.mass) * np.matmul(self.rot, thrust)
+        self.acc = acc
         self.vel = vel_damp * self.vel + dt * acc
         self.pos = self.pos + dt * self.vel
+
+        self.accelerometer = np.matmul(self.rot.T, acc + [0, 0, GRAV])
 
     # return eye, center, up suitable for gluLookAt representing onboard camera
     def look_at(self):
@@ -261,8 +266,8 @@ class ChaseCamera(object):
 
 
 class Quadrotor3DScene(object):
-    def __init__(self, goal, dynamics, w, h, resizable):
-        self.viewer = r3d.Viewer(w, h, resizable=resizable)
+    def __init__(self, goal, dynamics, w, h, resizable, visible=True):
+        self.viewer = r3d.Viewer(w, h, resizable=resizable, visible=visible)
         self.chase_cam = ChaseCamera(dynamics.pos, dynamics.vel)
 
         diameter = 2 * dynamics.arm
@@ -353,7 +358,7 @@ class QuadrotorEnv(gym.Env):
         self.observation_space = spaces.Box(-obs_high, obs_high)
 
         # TODO get this from a wrapper
-        self.ep_len = 256
+        self.ep_len = 10000
         self.tick = 0
         self.dt = 1.0 / 50.0
 
@@ -399,6 +404,103 @@ class QuadrotorEnv(gym.Env):
         if self.scene is None:
             self.scene = Quadrotor3DScene(self.goal, self.dynamics,
                 640, 480, resizable=True)
-            self.chase_cam = ChaseCamera(self.dynamics.pos, self.dynamics.vel)
         self.scene.update_state(self.dynamics)
         return self.scene.render_firstperson(return_rgb_array=(mode == 'rgb_array'))
+
+
+class QuadrotorVisionEnv(gym.Env):
+    metadata = {
+        'render.modes': ['human', 'rgb_array'],
+        'video.frames_per_second' : 50
+    }
+
+    def __init__(self):
+        np.seterr(under='ignore')
+        self.dynamics = default_dynamics()
+        self.controller = ShiftedMotorControl(self.dynamics)
+        self.action_space = self.controller.action_space(self.dynamics)
+        self.scene3p = None
+        self.scene1p = None
+
+        seq_len = 4
+        img_w, img_h = 64, 64
+        img_space = spaces.Box(-1, 1, (img_h, img_w, seq_len))
+        imu_space = spaces.Box(-100, 100, (6, seq_len))
+        self.observation_space = spaces.Tuple([img_space, imu_space])
+        self.img_buf = np.zeros((img_w, img_h, seq_len))
+        self.imu_buf = np.zeros((6, seq_len))
+
+        # TODO get this from a wrapper
+        self.ep_len = 10000
+        self.tick = 0
+        self.dt = 1.0 / 50.0
+
+        self._seed()
+
+        # size of the box from which initial position will be randomly sampled
+        # grows a little with each episode
+        self.box = 1.0
+
+    def _seed(self, seed=None):
+        self.np_random, seed = seeding.np_random(seed)
+        return [seed]
+
+    def _step(self, action):
+        self.controller.step(self.dynamics, action, self.dt)
+        reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
+        self.tick += 1
+        done = self.tick > self.ep_len
+        if self.scene3p is not None:
+            self.scene3p.chase_cam.step(self.dynamics.pos, self.dynamics.vel)
+
+        self.scene1p.update_state(self.dynamics)
+        rgb = self.scene1p.render_firstperson(return_rgb_array=True)
+        grey = (2.0 / 255.0) * np.mean(rgb, axis=2) - 1.0
+        self.img_buf = np.roll(self.img_buf, -1, axis=2)
+        self.img_buf[:,:,-1] = grey
+
+        imu = np.concatenate([self.dynamics.omega, self.dynamics.accelerometer])
+        self.imu_buf = np.roll(self.imu_buf, -1, axis=1)
+        self.imu_buf[:,-1] = imu
+
+        return (self.img_buf, self.imu_buf), reward, done, {}
+
+    def _reset(self):
+        self.goal = npa(0, 0, 2)
+        x, y = self.np_random.uniform(-self.box, self.box, size=(2,))
+        x = -abs(x)
+        y = 0
+        if self.box < 20:
+            self.box *= 1.0003 # x20 after 10000 resets
+        z = self.np_random.uniform(1, 3)
+        pos = npa(x, y, z)
+        vel = omega = npa(0, 0, 0)
+        #rotz = np.random.uniform(-np.pi, np.pi)
+        #rotation = r3d.rotz(rotz)
+        #rotation = rotation[:3,:3]
+        rotation = np.eye(3)
+        self.dynamics.set_state(pos, vel, rotation, omega)
+        if self.scene1p is None:
+            w, h, _ = self.img_buf.shape
+            self.scene1p = Quadrotor3DScene(self.goal, self.dynamics,
+                w, h, resizable=False, visible=False) #TODO deal with retina display
+        self.scene1p.update_state(self.dynamics)
+
+        # fill the buffers with copies of initial state
+        w, h, seq_len = self.img_buf.shape
+        rgb = self.scene1p.render_firstperson(return_rgb_array=True)
+        grey = (2.0 / 255.0) * np.mean(rgb, axis=2) - 1.0
+        self.img_buf = np.tile(grey[:,:,None], (1,1,seq_len))
+        imu = np.concatenate([self.dynamics.omega, self.dynamics.accelerometer])
+        self.imu_buf = np.tile(imu[:,None], (1,seq_len))
+
+        self.tick = 0
+        return (self.img_buf, self.imu_buf)
+
+    def _render(self, mode='human', close=False):
+        if self.scene3p is None:
+            self.scene3p = Quadrotor3DScene(self.goal, self.dynamics,
+                640, 480, resizable=True)
+        self.scene3p.update_state(self.dynamics)
+        return self.scene3p.render_chase(return_rgb_array=(mode == 'rgb_array'))
+        return None
