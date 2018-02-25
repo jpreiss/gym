@@ -6,6 +6,8 @@ from copy import deepcopy
 import os
 import six
 import sys
+import itertools
+import noise
 
 if "Apple" in sys.version:
     if 'DYLD_FALLBACK_LIBRARY_PATH' in os.environ:
@@ -223,12 +225,69 @@ class Color(SceneNode):
 def transform_and_color(transform, color, children):
     return Transform(transform, Color(color, children))
 
-class CheckerTexture(SceneNode):
-    def __init__(self, children):
+TEX_CHECKER = 0
+TEX_XOR = 1
+TEX_NOISE_GAUSSIAN = 2
+TEX_NOISE_PERLIN = 3
+TEX_OILY = 4
+TEX_VORONOI = 5
+TEX_TYPES = range(6)
+
+class ProceduralTexture(SceneNode):
+    def __init__(self, style, scale, children):
         self.children = children
+        # linear is default, those w/ nearest must overwrite
+        self.mag_filter = GL_LINEAR
+        if style == TEX_CHECKER:
+            image = np.zeros((256, 256))
+            image[:128,:128] = 1.0
+            image[128:,128:] = 1.0
+            self.mag_filter = GL_NEAREST
+        elif style == TEX_XOR:
+            x, y = np.meshgrid(range(256), range(256))
+            image = np.bitwise_xor(np.uint8(x), np.uint8(y))
+            self.mag_filter = GL_NEAREST
+        elif style == TEX_NOISE_GAUSSIAN:
+            nz = np.random.normal(size=(256,256))
+            image = np.clip(nz, -3, 3)
+        elif style == TEX_NOISE_PERLIN:
+            t = np.linspace(0, 1, 256)
+            nzfun = lambda x, y: noise.pnoise2(x, y,
+                octaves=10, persistence=0.8, repeatx=1, repeaty=1)
+            image = np.vectorize(nzfun)(*np.meshgrid(t, t))
+        elif style == TEX_OILY:
+            # from upvector.com "Intro to Procedural Textures"
+            t = np.linspace(0, 4, 256)
+            nzfun = lambda x, y: noise.snoise2(x, y,
+                octaves=10, persistence=0.45, repeatx=4, repeaty=4)
+            nz = np.vectorize(nzfun)(*np.meshgrid(t, t))
+
+            t = np.linspace(0, 20*np.pi, 257)[:-1]
+            x, y = np.meshgrid(t, t)
+            image = np.sin(x + 8*nz)
+        elif style == TEX_VORONOI:
+            npts = 64
+            points = np.random.uniform(size=(npts, 2))
+            # make it tile
+            shifts = itertools.product([-1, 0, 1], [-1, 0, 1])
+            points = np.vstack([points + shift for shift in shifts])
+            a = np.full((256, 256), np.inf)
+            t = np.linspace(0, 1, 256)
+            x, y = np.meshgrid(t, t)
+            for p in tiles:
+                dist2 = (x - p[0])**2 + (y - p[1])**2
+                a = np.minimum(a, dist2)
+            image = np.sqrt(a)
+        else:
+            raise KeyError("style does not exist")
+
+        low, high = 255.0 * scale[0], 255.0 * scale[1]
+        _scale_to_inplace(image, low, high)
+        self.tex = _np2tex(image)
 
     def build(self, batch, parent):
-        self.pyg_grp = _PygCheckerTexture(parent=parent)
+        self.pyg_grp = _PygTexture(tex=self.tex,
+            mag_filter=self.mag_filter, parent=parent)
         self._build_children(batch)
         return self.pyg_grp
 
@@ -311,20 +370,16 @@ class _PygColor(pyglet.graphics.Group):
         if self.alpha() < 1:
             glDisable(GL_BLEND)
 
-class _PygCheckerTexture(pyglet.graphics.Group):
-    def __init__(self, parent=None):
+class _PygTexture(pyglet.graphics.Group):
+    def __init__(self, tex, mag_filter, parent=None):
         super().__init__(parent=parent)
-        pattern = pyglet.image.CheckerImagePattern(
-            color1=(30,30,30,255),
-            color2=(50,50,50,255))
-        # higher res makes nicer mipmaps
-        res = 256
-        self.tex = pattern.create_image(res, res).get_texture()
+
+        self.tex = tex
         glBindTexture(GL_TEXTURE_2D, self.tex.id)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         glGenerateMipmap(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag_filter)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
 
         # anisotropic texturing helps a lot with checkerboard floors
@@ -340,6 +395,7 @@ class _PygCheckerTexture(pyglet.graphics.Group):
 
     def unset_state(self):
         glDisable(self.tex.target)
+
 
 class _PygAlphaBlending(pyglet.graphics.Group):
     def __init__(self, parent=None):
@@ -600,3 +656,20 @@ def _to_strip(strip):
     s1 = strip[-1,-1,:]
     return np.vstack([s0, np.reshape(strip, (-1, 3)), s1])
 
+def _scale_to_inplace(a, min1, max1):
+    id0 = id(a)
+    min0 = np.min(a.flatten())
+    max0 = np.max(a.flatten())
+    scl = (max1 - min1) / (max0 - min0)
+    shift = - (scl * min0) + min1
+    a *= scl
+    a += shift
+    assert id(a) == id0
+
+def _np2tex(a):
+    # TODO color
+    w, h = a.shape
+    b = np.uint8(a).tobytes()
+    assert len(b) == w * h
+    img = pyglet.image.ImageData(w, h, "L", b)
+    return img.get_texture()
