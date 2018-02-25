@@ -96,6 +96,11 @@ register(
 )
 
 register(
+    id='Quadrotor-Vision-v0',
+    entry_point='gym.envs.classic_control:QuadrotorVisionEnv',
+)
+
+register(
     id='QuadrotorBatch-v0',
     entry_point='gym.envs.classic_control:QuadrotorBatchEnv',
 )
