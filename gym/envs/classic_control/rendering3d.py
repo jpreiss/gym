@@ -46,13 +46,11 @@ def get_display(spec):
     else:
         raise error.Error('Invalid display specification: {}. (Must be a string like :0 or None.)'.format(spec))
 
-class FBO(object):
-    def __init__(self, shape):
+# TODO can we get some of this from Pyglet?
+class FBOTarget(object):
+    def __init__(self, width, height):
 
-        if len(shape) == 2:
-            shape = (shape[0], shape[1], 3)
-        else:
-            assert shape[2] == 3
+        shape = (width, height, 3)
         self.shape = shape
 
         self.fbo = GLuint(0)
@@ -91,131 +89,84 @@ class FBO(object):
         glDrawBuffers(1, draw_buffers)
         glViewport(0, 0, *self.shape[:2])
 
-    def read(self):
+    def finish(self):
         glReadPixels(0, 0, self.shape[1], self.shape[0],
             GL_RGB, GL_UNSIGNED_BYTE, self.fb_array.ctypes.data)
+
+    def read(self):
         return self.fb_array
 
 
-class Viewer(object):
+class WindowTarget(object):
+    def __init__(self, width, height, display=None, resizable=True):
 
-    #
-    # public interface
-    #
-
-    def __init__(self, width, height, display=None, resizable=True, visible=True):
-
-        self.fov = 45
-        self.visible = visible
-
-        config=Config(double_buffer=visible)
-
+        config=Config(double_buffer=True, depth_size=16)
         display = get_display(display)
         self.window = pyglet.window.Window(display=display,
             width=width, height=height, resizable=resizable,
-            visible=visible, vsync=visible, config=config
+            visible=True, vsync=True, config=config
         )
-
+        self.window.on_close = self.close
+        self.shape = (width, height, 3)
+        def on_resize(w, h):
+            self.shape = (w, h, 3)
         if resizable:
-            self.window.on_resize = self._gl_setup
-        self.window.on_close = self.window_closed_by_user
-        self.batches = []
-
-        self._gl_setup(width, height)
-        self._light_setup()
-        self.set_bgcolor(0, 0, 0)
-
-        # TODO shape should be arg
-        self.fbo = FBO((640, 640))
+            self.window.on_resize = on_resize
 
     def close(self):
         self.window.close()
 
-    def set_bgcolor(self, r, g, b):
-        glClearColor(r, g, b, 1.0)
+    def bind(self):
+        self.window.switch_to()
+        self.window.dispatch_events()
+        glViewport(0, 0, self.window.width, self.window.height)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
-    def set_fov(self, fov=None):
-        if fov is not None:
-            self.fov = fov
-        aspect = float(self.window.width) / self.window.height
+    def finish(self):
+        self.window.flip()
+
+
+class Camera(object):
+    def __init__(self, fov):
+        self.fov = fov
+        self.lookat = None
+
+    def look_at(self, eye, target, up):
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        self.lookat = (eye, target, up)
+        eye, target, up = list(eye), list(target), list(up)
+        gluLookAt(*(eye + target + up))
+
+    # TODO other ways to set the view matrix
+
+    # private
+    def _matrix(self, shape):
+        aspect = float(shape[0]) / shape[1]
         znear = 0.1
         zfar = 100.0
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         gluPerspective(self.fov, aspect, znear, zfar)
 
-    def look_at(self, eye, target, up):
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
-        eye, target, up = list(eye), list(target), list(up)
-        gluLookAt(*(eye + target + up))
+        # will make sense once more than one way of setting view matrix
+        assert sum([x is not None for x in (self.lookat,)]) < 2
 
-    def add_batch(self, batch):
-        self.batches.append(batch)
+        if self.lookat is not None:
+            eye, target, up = (list(x) for x in self.lookat)
+            gluLookAt(*(eye + target + up))
 
-    def render_screen(self, return_rgb_array=False):
-        self.window.switch_to()
-        glViewport(0, 0, self.window.width, self.window.height)
-        glBindFramebuffer(GL_FRAMEBUFFER, 0)
-        if self.visible:
-            self.window.dispatch_events()
 
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        for batch in self.batches:
-            batch.draw()
+# TODO we can add user-controlled lighting, etc. to this
+class Scene(object):
+    def __init__(self, batches, bgcolor=(0,0,0)):
+        self.batches = batches
+        self.bgcolor = bgcolor
 
-        arr = None
-        if return_rgb_array:
-            buffer = pyglet.image.get_buffer_manager().get_color_buffer()
-            image_data = buffer.get_image_data()
-            arr = np.fromstring(image_data.data, dtype=np.uint8, sep='')
-            # In https://github.com/openai/gym-http-api/issues/2, we
-            # discovered that someone using Xmonad on Arch was having
-            # a window of size 598 x 398, though a 600 x 400 window
-            # was requested. (Guess Xmonad was preserving a pixel for
-            # the boundary.) So we use the buffer height/width rather
-            # than the requested one.
-            arr = arr.reshape(buffer.height, buffer.width, 4)
-            arr = arr[::-1,:,0:3]
-
-        if self.visible:
-            self.window.flip()
-
-        return arr
-
-    def render_fbo(self):
-        self.fbo.bind()
-
-        glDepthMask(GL_TRUE);
-        glEnable(GL_DEPTH_TEST)
-        glFrontFace(GL_CCW)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        for batch in self.batches:
-            batch.draw()
-
-        return self.fbo.read()
-
-    def get_array(self):
-        self.window.flip()
-        image_data = pyglet.image.get_buffer_manager().get_color_buffer().get_image_data()
-        self.window.flip()
-        arr = np.fromstring(image_data.data, dtype=np.uint8, sep='')
-        arr = arr.reshape(self.height, self.width, 4)
-        return arr[::-1,:,0:3]
-
-    #
-    # private methods
-    #
-
-    # called on window resize
-    def _gl_setup(self, width, height):
-        glViewport(0, 0, width, height)
-        glFrontFace(GL_CCW)
-        glEnable(GL_DEPTH_TEST)
-        self.set_fov()
-
-    # should only be called once
-    def _light_setup(self):
+    # call only once GL context is ready
+    def initialize(self):
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
         glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(40.0, 100.0, 60.0, 1))
@@ -229,8 +180,24 @@ class Viewer(object):
         glLightfv(GL_LIGHT1, GL_SPECULAR, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
         glEnable(GL_LIGHT1)
 
-    def window_closed_by_user(self):
-        self.close()
+
+def draw(scene, camera, target):
+
+    target.bind() # sets viewport
+
+    r, g, b = scene.bgcolor
+    glClearColor(r, g, b, 1.0)
+    glFrontFace(GL_CCW)
+    glEnable(GL_DEPTH_TEST)
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+    camera._matrix(target.shape)
+
+    for batch in scene.batches:
+        batch.draw()
+
+    target.finish()
+
 
 class SceneNode(object):
     def _build_children(self, batch):

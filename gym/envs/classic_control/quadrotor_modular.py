@@ -335,9 +335,13 @@ def _random_obstacles(N, arena, our_radius):
 
 class Quadrotor3DScene(object):
     def __init__(self, goal, dynamics, w, h, resizable, obstacles=True, visible=True):
-        self.viewer = r3d.Viewer(w, h, resizable=resizable, visible=visible)
-        self.chase_cam = ChaseCamera(dynamics.pos, dynamics.vel)
 
+        self.window_target = r3d.WindowTarget(w, h, resizable=resizable)
+        self.obs_target = r3d.FBOTarget(64, 64)
+        self.cam1p = r3d.Camera(fov=90.0)
+        self.cam3p = r3d.Camera(fov=45.0)
+
+        self.chase_cam = ChaseCamera(dynamics.pos, dynamics.vel)
         self.world_box = 40.0
 
         diameter = 2 * dynamics.arm
@@ -360,7 +364,9 @@ class Quadrotor3DScene(object):
             + obstacles)
         batch = r3d.Batch()
         world.build(batch)
-        self.viewer.add_batch(batch)
+
+        self.scene = r3d.Scene(batches=[batch], bgcolor=(0,0,0))
+        self.scene.initialize()
 
     def _quadrotor_3dmodel(self, diam):
         r = diam / 2
@@ -387,12 +393,16 @@ class Quadrotor3DScene(object):
         arrow = r3d.Color((0.3, 0.3, 1.0), r3d.arrow(0.12*prop_r, 2.5*prop_r, 16))
 
         bodies = props + [arms, arrow]
+        self.have_state = False
         return r3d.Transform(np.eye(4), bodies)
 
     def update_state(self, dynamics):
+        self.have_state = True
+        self.fpv_lookat = dynamics.look_at()
+        self.chase_cam.step(dynamics.pos, dynamics.vel)
+
         matrix = r3d.trans_and_rot(dynamics.pos, dynamics.rot)
         self.quad_transform.set_transform(matrix)
-        self.firstperson_lookat = dynamics.look_at()
         shadow_pos = 0 + dynamics.pos
         shadow_pos[2] = 0.001 # avoid z-fighting
         matrix = r3d.translate(shadow_pos)
@@ -405,21 +415,16 @@ class Quadrotor3DScene(object):
             #print("Free!")
         return collided
 
-    def render_chase(self, return_rgb_array):
-        #eye, center, up = self.chase_cam.look_at()
-        #self.viewer.set_fov(45)
-        #self.viewer.look_at(eye, center, up)
-        self.viewer.set_fov(90)
-        self.viewer.look_at(*self.firstperson_lookat)
-        return self.viewer.render_screen(return_rgb_array=return_rgb_array)
+    def render_chase(self):
+        assert self.have_state
+        self.cam3p.look_at(*self.chase_cam.look_at())
+        r3d.draw(self.scene, self.cam3p, self.window_target)
 
-    def render_firstperson(self, return_rgb_array):
-        self.viewer.set_fov(90)
-        self.viewer.look_at(*self.firstperson_lookat)
-        return self.viewer.render(return_rgb_array=return_rgb_array)
-
-    def render_fbo(self):
-        return self.viewer.render_fbo()
+    def render_obs(self):
+        assert self.have_state
+        self.cam1p.look_at(*self.fpv_lookat)
+        r3d.draw(self.scene, self.cam1p, self.obs_target)
+        return self.obs_target.read()
 
 
 class QuadrotorEnv(gym.Env):
@@ -505,8 +510,7 @@ class QuadrotorVisionEnv(gym.Env):
         self.dynamics = default_dynamics()
         self.controller = ShiftedMotorControl(self.dynamics)
         self.action_space = self.controller.action_space(self.dynamics)
-        self.scene3p = None
-        self.scene1p = None
+        self.scene = None
 
         seq_len = 4
         img_w, img_h = 64, 64
@@ -537,17 +541,13 @@ class QuadrotorVisionEnv(gym.Env):
         self.tick += 1
         done = self.tick > self.ep_len
 
-        self.scene3p.update_state(self.dynamics)
-        self.scene3p.chase_cam.step(self.dynamics.pos, self.dynamics.vel)
-
-        #self.scene1p.update_state(self.dynamics)
-        #rgb = self.scene1p.render_firstperson(return_rgb_array=True)
-        rgb = self.scene3p.render_fbo()
+        self.scene.update_state(self.dynamics)
+        rgb = self.scene.render_obs()
 
         # for debugging:
-        #rgb = np.flip(rgb, axis=0)
-        #plt.imshow(rgb)
-        #plt.show()
+        rgb = np.flip(rgb, axis=0)
+        plt.imshow(rgb)
+        plt.show()
 
         grey = (2.0 / 255.0) * np.mean(rgb, axis=2) - 1.0
         self.img_buf = np.roll(self.img_buf, -1, axis=2)
@@ -579,14 +579,14 @@ class QuadrotorVisionEnv(gym.Env):
             #self.scene1p = Quadrotor3DScene(self.goal, self.dynamics,
                 #w, h, resizable=False, visible=False) #TODO deal with retina display
         #self.scene1p.update_state(self.dynamics)
-        if self.scene3p is None:
-            self.scene3p = Quadrotor3DScene(self.goal, self.dynamics,
+        if self.scene is None:
+            self.scene = Quadrotor3DScene(self.goal, self.dynamics,
                 640, 480, resizable=True)
+        self.scene.update_state(self.dynamics)
 
         # fill the buffers with copies of initial state
         w, h, seq_len = self.img_buf.shape
-        #rgb = self.scene1p.render_firstperson(return_rgb_array=True)
-        rgb = self.scene3p.render_fbo()
+        rgb = self.scene.render_obs()
         grey = (2.0 / 255.0) * np.mean(rgb, axis=2) - 1.0
         self.img_buf = np.tile(grey[:,:,None], (1,1,seq_len))
         imu = np.concatenate([self.dynamics.omega, self.dynamics.accelerometer])
@@ -596,5 +596,4 @@ class QuadrotorVisionEnv(gym.Env):
         return (self.img_buf, self.imu_buf)
 
     def _render(self, mode='human', close=False):
-        self.scene3p.update_state(self.dynamics)
-        return self.scene3p.render_chase(return_rgb_array=(mode == 'rgb_array'))
+        self.scene.render_chase()
