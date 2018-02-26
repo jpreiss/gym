@@ -8,6 +8,7 @@ import six
 import sys
 import itertools
 import noise
+import ctypes
 
 if "Apple" in sys.version:
     if 'DYLD_FALLBACK_LIBRARY_PATH' in os.environ:
@@ -20,7 +21,7 @@ import matplotlib.pyplot as plt
 
 try:
     import pyglet
-    pyglet.options['debug_gl'] = False
+    #pyglet.options['debug_gl'] = False
 except ImportError as e:
     reraise(suffix="HINT: you can install pyglet directly via 'pip install pyglet'. But if you really just want to install all Gym dependencies and not have to think about it, 'pip install -e .[all]' or 'pip install gym[all]' will do it.")
 
@@ -44,6 +45,57 @@ def get_display(spec):
         return pyglet.canvas.Display(spec)
     else:
         raise error.Error('Invalid display specification: {}. (Must be a string like :0 or None.)'.format(spec))
+
+class FBO(object):
+    def __init__(self, shape):
+
+        if len(shape) == 2:
+            shape = (shape[0], shape[1], 3)
+        else:
+            assert shape[2] == 3
+        self.shape = shape
+
+        self.fbo = GLuint(0)
+        glGenFramebuffers(1, ctypes.byref(self.fbo))
+        glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
+
+        # renderbuffer for depth
+        self.depth = GLuint(0)
+        glGenRenderbuffers(1, ctypes.byref(self.depth))
+        glBindRenderbuffer(GL_RENDERBUFFER, self.depth)
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, *shape)
+        # ??? (from songho.ca/opengl/gl_fbo.html)
+        glBindRenderbuffer(GL_RENDERBUFFER, 0)
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+            GL_RENDERBUFFER, self.depth)
+
+        # texture for RGB
+        self.tex = GLuint(0)
+        glGenTextures(1, ctypes.byref(self.tex))
+        glBindTexture(GL_TEXTURE_2D, self.tex)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, shape[0], shape[1], 0,
+            GL_RGB, GL_UNSIGNED_BYTE, 0)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D, self.tex, 0)
+
+        # test - ok to comment out?
+        draw_buffers = (GLenum * 1)(GL_COLOR_ATTACHMENT0)
+        glDrawBuffers(1, draw_buffers)
+        assert glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE
+
+        self.fb_array = np.zeros(shape, dtype=np.uint8)
+
+    def bind(self):
+        glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
+        draw_buffers = (GLenum * 1)(GL_COLOR_ATTACHMENT0)
+        glDrawBuffers(1, draw_buffers)
+        glViewport(0, 0, *self.shape[:2])
+
+    def read(self):
+        glReadPixels(0, 0, self.shape[1], self.shape[0],
+            GL_RGB, GL_UNSIGNED_BYTE, self.fb_array.ctypes.data)
+        return self.fb_array
+
 
 class Viewer(object):
 
@@ -73,15 +125,16 @@ class Viewer(object):
         self._light_setup()
         self.set_bgcolor(0, 0, 0)
 
+        # TODO shape should be arg
+        self.fbo = FBO((640, 640))
+
     def close(self):
         self.window.close()
 
     def set_bgcolor(self, r, g, b):
-        self.window.switch_to()
         glClearColor(r, g, b, 1.0)
 
     def set_fov(self, fov=None):
-        self.window.switch_to()
         if fov is not None:
             self.fov = fov
         aspect = float(self.window.width) / self.window.height
@@ -92,7 +145,6 @@ class Viewer(object):
         gluPerspective(self.fov, aspect, znear, zfar)
 
     def look_at(self, eye, target, up):
-        self.window.switch_to()
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         eye, target, up = list(eye), list(target), list(up)
@@ -101,12 +153,14 @@ class Viewer(object):
     def add_batch(self, batch):
         self.batches.append(batch)
 
-    def render(self, return_rgb_array=False):
+    def render_screen(self, return_rgb_array=False):
         self.window.switch_to()
+        glViewport(0, 0, self.window.width, self.window.height)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
         if self.visible:
             self.window.dispatch_events()
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         for batch in self.batches:
             batch.draw()
 
@@ -129,8 +183,19 @@ class Viewer(object):
 
         return arr
 
+    def render_fbo(self):
+        self.fbo.bind()
+
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST)
+        glFrontFace(GL_CCW)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        for batch in self.batches:
+            batch.draw()
+
+        return self.fbo.read()
+
     def get_array(self):
-        self.window.switch_to()
         self.window.flip()
         image_data = pyglet.image.get_buffer_manager().get_color_buffer().get_image_data()
         self.window.flip()
@@ -144,7 +209,6 @@ class Viewer(object):
 
     # called on window resize
     def _gl_setup(self, width, height):
-        self.window.switch_to()
         glViewport(0, 0, width, height)
         glFrontFace(GL_CCW)
         glEnable(GL_DEPTH_TEST)
@@ -152,7 +216,6 @@ class Viewer(object):
 
     # should only be called once
     def _light_setup(self):
-        self.window.switch_to()
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
         glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(40.0, 100.0, 60.0, 1))

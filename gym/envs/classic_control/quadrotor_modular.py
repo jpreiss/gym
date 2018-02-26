@@ -15,6 +15,7 @@ import sys
 import csv
 import datetime
 from copy import deepcopy
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
@@ -405,15 +406,20 @@ class Quadrotor3DScene(object):
         return collided
 
     def render_chase(self, return_rgb_array):
-        eye, center, up = self.chase_cam.look_at()
-        self.viewer.set_fov(45)
-        self.viewer.look_at(eye, center, up)
-        return self.viewer.render(return_rgb_array=return_rgb_array)
+        #eye, center, up = self.chase_cam.look_at()
+        #self.viewer.set_fov(45)
+        #self.viewer.look_at(eye, center, up)
+        self.viewer.set_fov(90)
+        self.viewer.look_at(*self.firstperson_lookat)
+        return self.viewer.render_screen(return_rgb_array=return_rgb_array)
 
     def render_firstperson(self, return_rgb_array):
         self.viewer.set_fov(90)
         self.viewer.look_at(*self.firstperson_lookat)
         return self.viewer.render(return_rgb_array=return_rgb_array)
+
+    def render_fbo(self):
+        return self.viewer.render_fbo()
 
 
 class QuadrotorEnv(gym.Env):
@@ -530,11 +536,19 @@ class QuadrotorVisionEnv(gym.Env):
         reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
         self.tick += 1
         done = self.tick > self.ep_len
-        if self.scene3p is not None:
-            self.scene3p.chase_cam.step(self.dynamics.pos, self.dynamics.vel)
 
-        self.scene1p.update_state(self.dynamics)
-        rgb = self.scene1p.render_firstperson(return_rgb_array=True)
+        self.scene3p.update_state(self.dynamics)
+        self.scene3p.chase_cam.step(self.dynamics.pos, self.dynamics.vel)
+
+        #self.scene1p.update_state(self.dynamics)
+        #rgb = self.scene1p.render_firstperson(return_rgb_array=True)
+        rgb = self.scene3p.render_fbo()
+
+        # for debugging:
+        #rgb = np.flip(rgb, axis=0)
+        #plt.imshow(rgb)
+        #plt.show()
+
         grey = (2.0 / 255.0) * np.mean(rgb, axis=2) - 1.0
         self.img_buf = np.roll(self.img_buf, -1, axis=2)
         self.img_buf[:,:,-1] = grey
@@ -560,15 +574,19 @@ class QuadrotorVisionEnv(gym.Env):
         #rotation = rotation[:3,:3]
         rotation = np.eye(3)
         self.dynamics.set_state(pos, vel, rotation, omega)
-        if self.scene1p is None:
-            w, h, _ = self.img_buf.shape
-            self.scene1p = Quadrotor3DScene(self.goal, self.dynamics,
-                w, h, resizable=False, visible=False) #TODO deal with retina display
-        self.scene1p.update_state(self.dynamics)
+        #if self.scene1p is None:
+            #w, h, _ = self.img_buf.shape
+            #self.scene1p = Quadrotor3DScene(self.goal, self.dynamics,
+                #w, h, resizable=False, visible=False) #TODO deal with retina display
+        #self.scene1p.update_state(self.dynamics)
+        if self.scene3p is None:
+            self.scene3p = Quadrotor3DScene(self.goal, self.dynamics,
+                640, 480, resizable=True)
 
         # fill the buffers with copies of initial state
         w, h, seq_len = self.img_buf.shape
-        rgb = self.scene1p.render_firstperson(return_rgb_array=True)
+        #rgb = self.scene1p.render_firstperson(return_rgb_array=True)
+        rgb = self.scene3p.render_fbo()
         grey = (2.0 / 255.0) * np.mean(rgb, axis=2) - 1.0
         self.img_buf = np.tile(grey[:,:,None], (1,1,seq_len))
         imu = np.concatenate([self.dynamics.omega, self.dynamics.accelerometer])
@@ -578,9 +596,5 @@ class QuadrotorVisionEnv(gym.Env):
         return (self.img_buf, self.imu_buf)
 
     def _render(self, mode='human', close=False):
-        if self.scene3p is None:
-            self.scene3p = Quadrotor3DScene(self.goal, self.dynamics,
-                640, 480, resizable=True)
         self.scene3p.update_state(self.dynamics)
         return self.scene3p.render_chase(return_rgb_array=(mode == 'rgb_array'))
-        return None
