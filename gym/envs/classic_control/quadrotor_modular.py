@@ -265,8 +265,72 @@ class ChaseCamera(object):
         return eye, center, up
 
 
+def place_obstacles(N, box, radius_range, tries=5):
+    t = np.linspace(0, box, 257)[:-1]
+    scale = box / 256.0
+    x, y = np.meshgrid(t, t)
+    pts = np.zeros((N, 2))
+    # initialize with 1m ball around center for quadrotor
+    dist = np.sqrt((x - box/2.0)**2 + (y - box/2.0)**2) - 1.0
+    radii = np.random.uniform(*radius_range, size=N)
+    radii = np.sort(radii)[::-1]
+    for i in range(N):
+        rad = radii[i]
+        ok = np.array(np.where(dist.flat > rad)).flatten()
+        if len(ok) == 0:
+            if tries == 1:
+                print("Warning: only able to place {}/{} obstacles. "
+                    "Increase box, decrease radius, or decrease N.")
+                return pts[:i,:], radii[:i]
+            else:
+                return place_obstacles(N, box, radius_range, tries-1)
+        p = np.random.choice(ok)
+        pt = np.unravel_index(p, dist.shape)
+        pt = scale * np.array(pt)
+        d = np.sqrt((x - pt[1])**2 + (y - pt[0])**2) - rad
+        dist = np.minimum(dist, d)
+        pts[i,:] = pt
+
+    return pts - box/2.0, radii
+
+def _random_obstacles(N):
+    # all primitives should be around 1x1x1 meter sitting on xy-plane
+    vbox = r3d.box_mesh(1, 1, 1)
+    vbox[:,2] += 0.5
+    box = r3d.Mesh(vbox)
+
+    vsphere, nsphere = r3d.sphere_strip(radius=0.5, resolution=16)
+    vsphere[:,2] += 0.5
+    sphere = r3d.TriStrip(vsphere, nsphere)
+
+    cylinder = r3d.cylinder(radius=0.5, height=1.0, sections=32)
+
+    cone = r3d.cone(radius=0.5, height=1.0, sections=32)
+
+    primitives = [box, sphere, cylinder, cone]
+
+    bodies = []
+    max_radius = 6.0
+    arena = 40.0 # size
+    positions, radii = place_obstacles(N, arena, (0.5, max_radius))
+    positions = np.hstack([positions, np.zeros((N,1))])
+    for i in range(N):
+        primitive = np.random.choice(primitives)
+        tex_type = np.random.choice(r3d.TEX_TYPES)
+        tex_dark = 0.5 * np.random.uniform()
+        tex_light = 0.5 * np.random.uniform() + 0.5
+        color = 0.5 * np.random.uniform(size=3)
+        matrix = np.matmul(r3d.translate(positions[i,:]), r3d.scale(radii[i]))
+        body = r3d.Transform(matrix,
+            #r3d.ProceduralTexture(tex_type, (tex_dark, tex_light), primitive))
+                r3d.Color(color, primitive))
+        bodies.append(body)
+
+    return bodies
+
+
 class Quadrotor3DScene(object):
-    def __init__(self, goal, dynamics, w, h, resizable, visible=True):
+    def __init__(self, goal, dynamics, w, h, resizable, obstacles=True, visible=True):
         self.viewer = r3d.Viewer(w, h, resizable=resizable, visible=visible)
         self.chase_cam = ChaseCamera(dynamics.pos, dynamics.vel)
 
@@ -282,10 +346,13 @@ class Quadrotor3DScene(object):
         goal = r3d.transform_and_color(r3d.translate(goal),
             (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
 
-        world = r3d.BackToFront([
-            floor, self.shadow_transform, goal, self.quad_transform])
+        obstacles = _random_obstacles(30)
+        world = r3d.World([
+            r3d.BackToFront([floor, self.shadow_transform]),
+            goal, self.quad_transform]
+            + obstacles)
         batch = r3d.Batch()
-        world.build(batch, None)
+        world.build(batch)
         self.viewer.add_batch(batch)
 
     def _quadrotor_3dmodel(self, diam):
@@ -358,7 +425,7 @@ class QuadrotorEnv(gym.Env):
         self.observation_space = spaces.Box(-obs_high, obs_high)
 
         # TODO get this from a wrapper
-        self.ep_len = 10000
+        self.ep_len = 1000
         self.tick = 0
         self.dt = 1.0 / 50.0
 
@@ -431,7 +498,7 @@ class QuadrotorVisionEnv(gym.Env):
         self.imu_buf = np.zeros((6, seq_len))
 
         # TODO get this from a wrapper
-        self.ep_len = 10000
+        self.ep_len = 500
         self.tick = 0
         self.dt = 1.0 / 50.0
 

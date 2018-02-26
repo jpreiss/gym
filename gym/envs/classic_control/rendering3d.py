@@ -245,7 +245,7 @@ class ProceduralTexture(SceneNode):
             self.mag_filter = GL_NEAREST
         elif style == TEX_XOR:
             x, y = np.meshgrid(range(256), range(256))
-            image = np.bitwise_xor(np.uint8(x), np.uint8(y))
+            image = np.float32(np.bitwise_xor(np.uint8(x), np.uint8(y)))
             self.mag_filter = GL_NEAREST
         elif style == TEX_NOISE_GAUSSIAN:
             nz = np.random.normal(size=(256,256))
@@ -271,10 +271,12 @@ class ProceduralTexture(SceneNode):
             # make it tile
             shifts = itertools.product([-1, 0, 1], [-1, 0, 1])
             points = np.vstack([points + shift for shift in shifts])
+            unlikely = np.any(np.logical_or(points < -0.25, points > 1.25), axis=1)
+            points = np.delete(points, np.where(unlikely), axis=0)
             a = np.full((256, 256), np.inf)
             t = np.linspace(0, 1, 256)
             x, y = np.meshgrid(t, t)
-            for p in tiles:
+            for p in points:
                 dist2 = (x - p[0])**2 + (y - p[1])**2
                 a = np.minimum(a, dist2)
             image = np.sqrt(a)
@@ -296,6 +298,9 @@ class ProceduralTexture(SceneNode):
 # these functions return 4x4 rotation matrix suitable to construct Transform
 # or to mutate Transform via set_matrix
 #
+def scale(s):
+    return np.diag([s, s, s, 1.0])
+
 def translate(x):
     r = np.eye(4)
     r[:3,3] = x
