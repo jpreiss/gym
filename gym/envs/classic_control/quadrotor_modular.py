@@ -357,7 +357,12 @@ class Quadrotor3DScene(object):
         goal = r3d.transform_and_color(r3d.translate(goal),
             (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
 
-        obstacles, self.freespace = _random_obstacles(30, self.world_box, dynamics.arm)
+        if obstacles:
+            obstacles, self.freespace = _random_obstacles(30, self.world_box, dynamics.arm)
+        else:
+            obstacles = []
+            self.freespace = None
+
         world = r3d.World([
             r3d.BackToFront([floor, self.shadow_transform]),
             goal, self.quad_transform]
@@ -407,8 +412,11 @@ class Quadrotor3DScene(object):
         shadow_pos[2] = 0.001 # avoid z-fighting
         matrix = r3d.translate(shadow_pos)
         self.shadow_transform.set_transform(matrix)
-        i, j = np.int32(dynamics.pos[:2])
-        collided = not self.freespace[i,j]
+        if self.freespace is not None:
+            i, j = np.int32(dynamics.pos[:2])
+            collided = not self.freespace[i,j]
+        else:
+            collided = False
         #if collided:
             #print("Collided!")
         #else:
@@ -465,11 +473,11 @@ class QuadrotorEnv(gym.Env):
 
     def _step(self, action):
         self.controller.step(self.dynamics, action, self.dt)
+        if self.scene is not None:
+            self.scene.update_state(self.dynamics)
         reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
         self.tick += 1
         done = self.tick > self.ep_len
-        if self.scene is not None:
-            self.scene.chase_cam.step(self.dynamics.pos, self.dynamics.vel)
         sv = self.dynamics.state_vector()
         return sv, reward, done, {}
 
@@ -494,9 +502,9 @@ class QuadrotorEnv(gym.Env):
     def _render(self, mode='human', close=False):
         if self.scene is None:
             self.scene = Quadrotor3DScene(self.goal, self.dynamics,
-                640, 480, resizable=True)
+                640, 480, resizable=True, obstacles=False)
         self.scene.update_state(self.dynamics)
-        return self.scene.render_firstperson(return_rgb_array=(mode == 'rgb_array'))
+        self.scene.render_chase()
 
 
 class QuadrotorVisionEnv(gym.Env):
@@ -574,11 +582,7 @@ class QuadrotorVisionEnv(gym.Env):
         #rotation = rotation[:3,:3]
         rotation = np.eye(3)
         self.dynamics.set_state(pos, vel, rotation, omega)
-        #if self.scene1p is None:
-            #w, h, _ = self.img_buf.shape
-            #self.scene1p = Quadrotor3DScene(self.goal, self.dynamics,
-                #w, h, resizable=False, visible=False) #TODO deal with retina display
-        #self.scene1p.update_state(self.dynamics)
+
         if self.scene is None:
             self.scene = Quadrotor3DScene(self.goal, self.dynamics,
                 640, 480, resizable=True)
