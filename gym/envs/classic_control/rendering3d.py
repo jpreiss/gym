@@ -231,7 +231,9 @@ TEX_NOISE_GAUSSIAN = 2
 TEX_NOISE_PERLIN = 3
 TEX_OILY = 4
 TEX_VORONOI = 5
-TEX_TYPES = range(6)
+
+def random_textype():
+    return np.random.randint(TEX_VORONOI + 1)
 
 class ProceduralTexture(SceneNode):
     def __init__(self, style, scale, children):

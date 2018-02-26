@@ -265,13 +265,13 @@ class ChaseCamera(object):
         return eye, center, up
 
 
-def place_obstacles(N, box, radius_range, tries=5):
+def place_obstacles(N, box, radius_range, our_radius, tries=5):
     t = np.linspace(0, box, 257)[:-1]
     scale = box / 256.0
     x, y = np.meshgrid(t, t)
     pts = np.zeros((N, 2))
     # initialize with 1m ball around center for quadrotor
-    dist = np.sqrt((x - box/2.0)**2 + (y - box/2.0)**2) - 1.0
+    dist = np.sqrt((x - box/2.0)**2 + (y - box/2.0)**2) - 4.0 * our_radius
     radii = np.random.uniform(*radius_range, size=N)
     radii = np.sort(radii)[::-1]
     for i in range(N):
@@ -291,9 +291,12 @@ def place_obstacles(N, box, radius_range, tries=5):
         dist = np.minimum(dist, d)
         pts[i,:] = pt
 
-    return pts - box/2.0, radii
+    freespace = dist > 1.2 * our_radius
+    amt_free = sum(freespace.flat) / float(freespace.size)
+    print(amt_free * 100, "pct free space")
+    return pts, radii, freespace
 
-def _random_obstacles(N):
+def _random_obstacles(N, arena, our_radius):
     # all primitives should be around 1x1x1 meter sitting on xy-plane
     vbox = r3d.box_mesh(1, 1, 1)
     vbox[:,2] += 0.5
@@ -310,13 +313,13 @@ def _random_obstacles(N):
     primitives = [box, sphere, cylinder, cone]
 
     bodies = []
-    max_radius = 6.0
-    arena = 40.0 # size
-    positions, radii = place_obstacles(N, arena, (0.5, max_radius))
+    max_radius = 4.0
+    positions, radii, freespace = place_obstacles(
+        N, arena, (0.5, max_radius), our_radius)
     positions = np.hstack([positions, np.zeros((N,1))])
     for i in range(N):
         primitive = np.random.choice(primitives)
-        tex_type = np.random.choice(r3d.TEX_TYPES)
+        tex_type = r3d.random_textype()
         tex_dark = 0.5 * np.random.uniform()
         tex_light = 0.5 * np.random.uniform() + 0.5
         color = 0.5 * np.random.uniform(size=3)
@@ -326,7 +329,7 @@ def _random_obstacles(N):
                 r3d.Color(color, primitive))
         bodies.append(body)
 
-    return bodies
+    return bodies, freespace
 
 
 class Quadrotor3DScene(object):
@@ -334,19 +337,22 @@ class Quadrotor3DScene(object):
         self.viewer = r3d.Viewer(w, h, resizable=resizable, visible=visible)
         self.chase_cam = ChaseCamera(dynamics.pos, dynamics.vel)
 
+        self.world_box = 40.0
+
         diameter = 2 * dynamics.arm
         self.quad_transform = self._quadrotor_3dmodel(diameter)
 
         self.shadow_transform = r3d.transform_and_color(
             np.eye(4), (0, 0, 0, 0.4), r3d.circle(0.75*diameter, 32))
 
-        floor = r3d.ProceduralTexture(r3d.TEX_CHECKER, (0.15, 0.25),
+        # TODO make floor size or walls to indicate world_box
+        floor = r3d.ProceduralTexture(r3d.random_textype(), (0.15, 0.25),
             r3d.rect((1000, 1000), (0, 100), (0, 100)))
 
         goal = r3d.transform_and_color(r3d.translate(goal),
             (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
 
-        obstacles = _random_obstacles(30)
+        obstacles, self.freespace = _random_obstacles(30, self.world_box, dynamics.arm)
         world = r3d.World([
             r3d.BackToFront([floor, self.shadow_transform]),
             goal, self.quad_transform]
@@ -390,6 +396,13 @@ class Quadrotor3DScene(object):
         shadow_pos[2] = 0.001 # avoid z-fighting
         matrix = r3d.translate(shadow_pos)
         self.shadow_transform.set_transform(matrix)
+        i, j = np.int32(dynamics.pos[:2])
+        collided = not self.freespace[i,j]
+        #if collided:
+            #print("Collided!")
+        #else:
+            #print("Free!")
+        return collided
 
     def render_chase(self, return_rgb_array):
         eye, center, up = self.chase_cam.look_at()
