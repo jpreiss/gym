@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 GRAV = 9.81
 TILES = 256 # number of tiles used for the obstacle map
 
+# overall TODO:
+# - fix front face CCW to enable culling
+# - add texture coords to primitives
+# - add more controllers
+# - oracle policy (access to map, true state, etc.)
+# - non-flat floor
+# - fog
+
 # numpy's cross is really slow for some reason
 def cross(a, b):
     return np.array([a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]])
@@ -62,9 +70,13 @@ class QuadrotorDynamics(object):
         assert np.isscalar(mass)
         assert np.isscalar(arm_length)
         assert inertia.shape == (3,)
+        # unit: kilogram
         self.mass = mass
+        # unit: meter
         self.arm = arm_length
+        # unit: kg * m^2
         self.inertia = inertia
+        # unit: ratio
         self.thrust_to_weight = thrust_to_weight
         self.thrust = GRAV * mass * thrust_to_weight / 4.0
         self.torque = torque_to_thrust * self.thrust
@@ -73,7 +85,9 @@ class QuadrotorDynamics(object):
             [1,  1, -1, -1],
             [1, -1, -1,  1],
             [0,  0,  0,  0]]).T # row-wise easier with np
+        # unit: meters^2 ??? maybe wrong
         self.prop_crossproducts = np.cross(self.prop_pos, [0, 0, 1])
+        # 1 for props turning CCW, -1 for CW
         self.prop_ccw = np.array([1, -1, 1, -1])
 
     # pos, vel, in world coords
@@ -108,6 +122,7 @@ class QuadrotorDynamics(object):
         torques = self.prop_crossproducts * thrusts[:,None]
         torques[:,2] += self.torque * self.prop_ccw * thrust_cmds
         torque = np.sum(torques, axis=0)
+        thrust = npa(0,0,np.sum(thrusts))
 
         # TODO add noise
 
@@ -349,7 +364,7 @@ class ObstacleMap(object):
             return True
         r, c = self.coord2tile(*dynamics.pos[:2])
         if r < 0 or c < 0 or r >= TILES or c >= TILES:
-            print("collided with wall!")
+            print("collided with wall")
             return True
         if self.test is not None:
             radius = dynamics.arm + 0.1
@@ -582,9 +597,13 @@ class QuadrotorVisionEnv(gym.Env):
         img_w, img_h = 64, 64
         img_space = spaces.Box(-1, 1, (img_h, img_w, seq_len))
         imu_space = spaces.Box(-100, 100, (6, seq_len))
-        self.observation_space = spaces.Tuple([img_space, imu_space])
+        # vector from us to goal projected onto world plane and rotated into
+        # our "looking forward" coordinates, and clamped to a maximal length
+        dir_space = spaces.Box(-4, 4, (2, seq_len))
+        self.observation_space = spaces.Tuple([img_space, imu_space, dir_space])
         self.img_buf = np.zeros((img_w, img_h, seq_len))
         self.imu_buf = np.zeros((6, seq_len))
+        self.dir_buf = np.zeros((2, seq_len))
 
         # TODO get this from a wrapper
         self.ep_len = 500
@@ -592,10 +611,6 @@ class QuadrotorVisionEnv(gym.Env):
         self.dt = 1.0 / 50.0
 
         self._seed()
-
-        # size of the box from which initial position will be randomly sampled
-        # grows a little with each episode
-        self.box = 1.0
 
     def _seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -625,7 +640,27 @@ class QuadrotorVisionEnv(gym.Env):
         self.imu_buf = np.roll(self.imu_buf, -1, axis=1)
         self.imu_buf[:,-1] = imu
 
-        return (self.img_buf, self.imu_buf), reward, done, {}
+        # heading measurement
+        fwd = self.dynamics.rot[:,0]
+        fwd[2] = 0.0
+        fwd, mag = normalize(fwd)
+        if mag < 0.2:
+            # we are almost at a singularity, heading angle no longer meaningful
+            dir = np.zeros(2)
+        else:
+            left = cross([0, 0, 1], fwd)
+            rot_flat = np.column_stack([fwd, left, npa(0, 0, 1)])
+            to_goal = self.goal - self.dynamics.pos
+            to_goal[2] = 0.0
+            goal_dir, dist = normalize(to_goal)
+            # clamp the size of this vector - 
+            # once we're far away, distance doesn't matter anymore
+            dir = min(dist, 4.0) * np.matmul(rot_flat.T, goal_dir)[:2]
+
+        self.dir_buf = np.roll(self.dir_buf, -1, axis=1)
+        self.dir_buf[:,-1] = dir
+
+        return (self.img_buf, self.imu_buf, self.dir_buf), reward, done, {}
 
     def _reset(self):
         if self.scene is None:
