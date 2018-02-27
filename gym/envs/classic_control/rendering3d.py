@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 try:
     import pyglet
-    #pyglet.options['debug_gl'] = False
+    pyglet.options['debug_gl'] = False
 except ImportError as e:
     reraise(suffix="HINT: you can install pyglet directly via 'pip install pyglet'. But if you really just want to install all Gym dependencies and not have to think about it, 'pip install -e .[all]' or 'pip install gym[all]' will do it.")
 
@@ -102,9 +102,10 @@ class WindowTarget(object):
 
         config=Config(double_buffer=True, depth_size=16)
         display = get_display(display)
+        # vsync is set to false to speed up FBO-only renders, we enable before draw
         self.window = pyglet.window.Window(display=display,
             width=width, height=height, resizable=resizable,
-            visible=True, vsync=True, config=config
+            visible=True, vsync=False, config=config
         )
         self.window.on_close = self.close
         self.shape = (width, height, 3)
@@ -118,12 +119,14 @@ class WindowTarget(object):
 
     def bind(self):
         self.window.switch_to()
+        self.window.set_vsync(True)
         self.window.dispatch_events()
         glViewport(0, 0, self.window.width, self.window.height)
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
     def finish(self):
         self.window.flip()
+        self.window.set_vsync(False)
 
 
 class Camera(object):
@@ -201,11 +204,15 @@ def draw(scene, camera, target):
 
 class SceneNode(object):
     def _build_children(self, batch):
-        if isinstance(self.children, type([])):
-            for c in self.children:
-                c.build(batch, self.pyg_grp)
-        else:
-            self.children.build(batch, self.pyg_grp)
+        # hack - should go somewhere else
+        if not isinstance(self.children, type([])):
+            self.children = [self.children]
+        for c in self.children:
+            c.build(batch, self.pyg_grp)
+
+    # default impl
+    def collide_sphere(self, x, radius):
+        return any(c.collide_sphere(x, radius) for c in self.children)
 
 class World(SceneNode):
     def __init__(self, children):
@@ -218,6 +225,7 @@ class World(SceneNode):
 class Transform(SceneNode):
     def __init__(self, transform, children):
         self.t = transform
+        self.mat_inv = np.linalg.inv(transform)
         self.children = children
 
     def build(self, batch, parent):
@@ -227,6 +235,16 @@ class Transform(SceneNode):
 
     def set_transform(self, t):
         self.pyg_grp.set_matrix(t)
+        self.mat_inv = np.linalg.inv(t)
+
+    def set_transform_nocollide(self, t):
+        self.pyg_grp.set_matrix(t)
+
+    def collide_sphere(self, x, radius):
+        xh = [x[0], x[1], x[2], 1]
+        xlocal = np.matmul(self.mat_inv, xh)[:3]
+        rlocal = radius * self.mat_inv[0,0]
+        return any(c.collide_sphere(xlocal, rlocal) for c in self.children)
 
 class BackToFront(SceneNode):
     def __init__(self, children):
@@ -388,9 +406,11 @@ class _PygColor(pyglet.graphics.Group):
 
     def set_rgb(self, r, g, b):
         self.color = (r, g, b, 1)
+        self.ccolor = (GLfloat * 4)(*self.color)
 
     def set_rgba(self, r, g, b, a):
         self.color = (r, g, b, a)
+        self.ccolor = (GLfloat * 4)(*self.color)
 
     def alpha(self):
         return self.color[-1]
@@ -400,8 +420,8 @@ class _PygColor(pyglet.graphics.Group):
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, (GLfloat * 4)(*self.color))
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(*self.color))
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, self.ccolor)
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, self.ccolor)
 
     def unset_state(self):
         if self.alpha() < 1:
@@ -447,6 +467,33 @@ class _PygAlphaBlending(pyglet.graphics.Group):
 
 Batch = pyglet.graphics.Batch
 
+class SphereCollision(object):
+    def __init__(self, radius):
+        self.radius = radius
+    def collide_sphere(self, x, radius):
+        c = np.sum(x ** 2) < (self.radius + radius) ** 2
+        if c: print("collided with sphere")
+        return c
+
+class AxisBoxCollision(object):
+    def __init__(self, corner0, corner1):
+        self.corner0, self.corner1 = corner0, corner1
+    def collide_sphere(self, x, radius):
+        nearest = np.maximum(self.corner0, np.minimum(x, self.corner1))
+        c = np.sum((x - nearest)**2) < radius**2
+        if c: print("collided with box")
+        return c
+
+class CapsuleCollision(object):
+    def __init__(self, radius, height):
+        self.radius, self.height = radius, height
+    def collide_sphere(self, x, radius):
+        z = min(max(0, x[2]), self.height)
+        nearest = [0, 0, z]
+        c = np.sum((x - nearest)**2) < (self.radius + radius)**2
+        if c: print("collided with capsule")
+        return c
+
 #
 # these are the 3d primitives that can be added to a pyglet.graphics.Batch.
 # construct them with the shape functions below.
@@ -456,8 +503,14 @@ class BatchElement(SceneNode):
         self.batch_args[2] = parent
         batch.add(*self.batch_args)
 
+    def collide_sphere(self, x, radius):
+        if self.collider is not None:
+            return self.collider.collide_sphere(x, radius)
+        else:
+            return False
+
 class Mesh(BatchElement):
-    def __init__(self, verts, normals=None, st=None):
+    def __init__(self, verts, normals=None, st=None, collider=None):
         if len(verts.shape) != 2 or verts.shape[1] != 3:
             raise ValueError('verts must be an N x 3 NumPy array')
 
@@ -483,9 +536,10 @@ class Mesh(BatchElement):
         ]
         if st is not None:
             self.batch_args.append(('t2f/static', list(st.flatten())))
+        self.collider = collider
 
 class TriStrip(BatchElement):
-    def __init__(self, verts, normals):
+    def __init__(self, verts, normals, collider=None):
         N, dim = verts.shape
         assert dim == 3
         assert normals.shape == verts.shape
@@ -494,9 +548,10 @@ class TriStrip(BatchElement):
             ('v3f/static', list(verts.flatten())),
             ('n3f/static', list(normals.flatten()))
         ]
+        self.collider = collider
 
 class TriFan(BatchElement):
-    def __init__(self, verts, normals):
+    def __init__(self, verts, normals, collider=None):
         N, dim = verts.shape
         assert dim == 3
         assert normals.shape == verts.shape
@@ -505,19 +560,25 @@ class TriFan(BatchElement):
             ('v3f/static', list(verts.flatten())),
             ('n3f/static', list(normals.flatten()))
         ]
+        self.collider = collider
 
 # a box centered on the origin
 def box(x, y, z):
+    corner1 = np.array([x,y,z]) / 2
+    corner0 = -corner1
     v = box_mesh(x, y, z)
-    return Mesh(v)
+    collider = AxisBoxCollision(corner0, corner1)
+    return Mesh(v, collider=collider)
 
 # cylinder sitting on xy plane pointing +z
 def cylinder(radius, height, sections):
     v, n = cylinder_strip(radius, height, sections)
-    return TriStrip(v, n)
+    collider = CapsuleCollision(radius, height)
+    return TriStrip(v, n, collider=collider)
 
 # cone sitting on xy plane pointing +z
 def cone(radius, height, sections):
+    # TODO collision detectoin
     v, n = cone_strip(radius, height, sections)
     return TriStrip(v, n)
 
@@ -529,7 +590,8 @@ def arrow(radius, height, sections):
 # sphere centered on origin, n tris will be about TODO * facets
 def sphere(radius, facets):
     v, n = sphere_strip(radius, facets)
-    return TriStrip(v, n)
+    collider = SphereCollision(radius)
+    return TriStrip(v, n, collider=collider)
 
 # square in xy plane centered on origin
 # dim: (w, h)

@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 GRAV = 9.81
 
+# numpy's cross is really slow for some reason
+def cross(a, b):
+    return np.array([a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]])
+
 def is_orthonormal(m):
     return np.max(np.abs(np.matmul(m, m.T) - np.eye(3)).flatten()) < 0.00001
 
@@ -39,8 +43,8 @@ def rand_uniform_rot3d(np_random):
     fwd = randunit()
     while np.dot(fwd, up) > 0.95:
         fwd = randunit()
-    left = normalize(np.cross(up, fwd))
-    up = np.cross(fwd, left)
+    left = normalize(cross(up, fwd))
+    up = cross(fwd, left)
     rot = np.hstack([fwd, left, up])
 
 def npa(*args):
@@ -70,6 +74,7 @@ class QuadrotorDynamics(object):
             [1,  1, -1, -1],
             [1, -1, -1,  1],
             [0,  0,  0,  0]]).T # row-wise easier with np
+        self.prop_crossproducts = np.cross(self.prop_pos, [0, 0, 1])
         self.prop_ccw = np.array([1, -1, 1, -1])
 
     # pos, vel, in world coords
@@ -83,6 +88,7 @@ class QuadrotorDynamics(object):
         assert is_orthonormal(rotation)
         self.pos = deepcopy(position)
         self.vel = deepcopy(velocity)
+        print("velocity:", self.vel)
         self.acc = np.zeros(3)
         self.accelerometer = np.array([0, 0, GRAV])
         self.rot = deepcopy(rotation)
@@ -112,7 +118,7 @@ class QuadrotorDynamics(object):
         assert np.all(thrust_cmds <= 1)
         thrusts = self.thrust * thrust_cmds
         thrust = npa(0,0,np.sum(thrusts))
-        torques = np.cross(self.prop_pos, [0, 0, 1]) * thrusts[:,None]
+        torques = self.prop_crossproducts * thrusts[:,None]
         torques[:,2] += self.torque * self.prop_ccw * thrust_cmds
         torque = np.sum(torques, axis=0)
 
@@ -123,7 +129,7 @@ class QuadrotorDynamics(object):
 
         # rotational dynamics
         omega_dot = ((1.0 / self.inertia) *
-            (np.cross(-self.omega, self.inertia * self.omega) + torque))
+            (cross(-self.omega, self.inertia * self.omega) + torque))
         self.omega = omega_damp * self.omega + dt * omega_dot
 
         x, y, z = self.omega
@@ -151,7 +157,7 @@ class QuadrotorDynamics(object):
         theta = np.radians(degrees_down)
         to, _ = normalize(np.cos(theta) * R[:,0] - np.sin(theta) * R[:,2])
         center = eye + to
-        up = np.cross(to, R[:,1])
+        up = cross(to, R[:,1])
         return eye, center, up
 
     def state_vector(self):
@@ -235,7 +241,7 @@ class ChaseCamera(object):
     def __init__(self, pos=npa(0,0,0), vel=npa(0,0,0)):
         self.pos_smooth = pos
         self.vel_smooth = vel
-        self.right_smooth, _ = normalize(np.cross(vel, npa(0, 0, 1)))
+        self.right_smooth, _ = normalize(cross(vel, npa(0, 0, 1)))
         self.view_dist = 4
 
     def step(self, pos, vel):
@@ -249,17 +255,18 @@ class ChaseCamera(object):
         veln, n = normalize(self.vel_smooth)
         up = npa(0, 0, 1)
         ideal_vel, _ = normalize(-self.pos_smooth)
+        #ideal_vel = veln # DEBUG for not looking at goal
         if True or np.abs(veln[2]) > 0.95 or n < 0.01 or np.dot(veln, ideal_vel) < 0.7:
             # look towards goal even though we are not heading there
-            right, _ = normalize(np.cross(ideal_vel, up))
+            right, _ = normalize(cross(ideal_vel, up))
         else:
-            right, _ = normalize(np.cross(veln, up))
+            right, _ = normalize(cross(veln, up))
         self.right_smooth = ar * self.right_smooth + (1 - ar) * right
 
     # return eye, center, up suitable for gluLookAt
     def look_at(self):
         up = npa(0, 0, 1)
-        back, _ = normalize(np.cross(self.right_smooth, up))
+        back, _ = normalize(cross(self.right_smooth, up))
         to_eye, _ = normalize(0.9 * back + 0.3 * self.right_smooth)
         eye = self.pos_smooth + self.view_dist * (to_eye + 0.3 * up)
         center = self.pos_smooth
@@ -270,9 +277,10 @@ def place_obstacles(N, box, radius_range, our_radius, tries=5):
     t = np.linspace(0, box, 257)[:-1]
     scale = box / 256.0
     x, y = np.meshgrid(t, t)
-    pts = np.zeros((N, 2))
+    pts = np.zeros((N, 3))
     # initialize with 1m ball around center for quadrotor
     dist = np.sqrt((x - box/2.0)**2 + (y - box/2.0)**2) - 4.0 * our_radius
+    # actually diameters...
     radii = np.random.uniform(*radius_range, size=N)
     radii = np.sort(radii)[::-1]
     for i in range(N):
@@ -290,41 +298,39 @@ def place_obstacles(N, box, radius_range, our_radius, tries=5):
         pt = scale * np.array(pt)
         d = np.sqrt((x - pt[1])**2 + (y - pt[0])**2) - rad
         dist = np.minimum(dist, d)
-        pts[i,:] = pt
+        pts[i,:2] = pt - box/2.0
+        pts[i,2] = rad / 2.0
 
-    freespace = dist > 1.2 * our_radius
+    # very coarse to allow for binning bugs
+    freespace = dist > 2 * our_radius
     amt_free = sum(freespace.flat) / float(freespace.size)
     print(amt_free * 100, "pct free space")
     return pts, radii, freespace
 
 def _random_obstacles(N, arena, our_radius):
     # all primitives should be around 1x1x1 meter sitting on xy-plane
-    vbox = r3d.box_mesh(1, 1, 1)
-    vbox[:,2] += 0.5
-    box = r3d.Mesh(vbox)
-
-    vsphere, nsphere = r3d.sphere_strip(radius=0.5, resolution=16)
-    vsphere[:,2] += 0.5
-    sphere = r3d.TriStrip(vsphere, nsphere)
-
+    box = r3d.box(1, 1, 1)
+    sphere = r3d.sphere(radius=0.5, facets=16)
     cylinder = r3d.cylinder(radius=0.5, height=1.0, sections=32)
+    # TODO cone-sphere collision
+    #cone = r3d.cone(radius=0.5, height=1.0, sections=32)
 
-    cone = r3d.cone(radius=0.5, height=1.0, sections=32)
-
-    primitives = [box, sphere, cylinder, cone]
+    primitives = [box, sphere, cylinder]
 
     bodies = []
-    max_radius = 4.0
+    max_radius = 6.0
     positions, radii, freespace = place_obstacles(
         N, arena, (0.5, max_radius), our_radius)
-    positions = np.hstack([positions, np.zeros((N,1))])
     for i in range(N):
         primitive = np.random.choice(primitives)
         tex_type = r3d.random_textype()
         tex_dark = 0.5 * np.random.uniform()
         tex_light = 0.5 * np.random.uniform() + 0.5
         color = 0.5 * np.random.uniform(size=3)
-        matrix = np.matmul(r3d.translate(positions[i,:]), r3d.scale(radii[i]))
+        translation = positions[i,:]
+        if primitive is cylinder:
+            translation[2] = 0
+        matrix = np.matmul(r3d.translate(translation), r3d.scale(radii[i]))
         body = r3d.Transform(matrix,
             #r3d.ProceduralTexture(tex_type, (tex_dark, tex_light), primitive))
                 r3d.Color(color, primitive))
@@ -332,14 +338,13 @@ def _random_obstacles(N, arena, our_radius):
 
     return bodies, freespace
 
-
 class Quadrotor3DScene(object):
     def __init__(self, goal, dynamics, w, h, resizable, obstacles=True, visible=True):
 
         self.window_target = r3d.WindowTarget(w, h, resizable=resizable)
         self.obs_target = r3d.FBOTarget(64, 64)
         self.cam1p = r3d.Camera(fov=90.0)
-        self.cam3p = r3d.Camera(fov=45.0)
+        self.cam3p = r3d.Camera(fov=95.0)
 
         self.chase_cam = ChaseCamera(dynamics.pos, dynamics.vel)
         self.world_box = 40.0
@@ -358,15 +363,16 @@ class Quadrotor3DScene(object):
             (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
 
         if obstacles:
-            obstacles, self.freespace = _random_obstacles(30, self.world_box, dynamics.arm)
+            self.obstacles, self.freespace = (
+                _random_obstacles(30, self.world_box, dynamics.arm))
         else:
-            obstacles = []
+            self.obstacles = []
             self.freespace = None
 
         world = r3d.World([
             r3d.BackToFront([floor, self.shadow_transform]),
             goal, self.quad_transform]
-            + obstacles)
+            + self.obstacles)
         batch = r3d.Batch()
         world.build(batch)
 
@@ -407,25 +413,33 @@ class Quadrotor3DScene(object):
         self.chase_cam.step(dynamics.pos, dynamics.vel)
 
         matrix = r3d.trans_and_rot(dynamics.pos, dynamics.rot)
-        self.quad_transform.set_transform(matrix)
+        self.quad_transform.set_transform_nocollide(matrix)
         shadow_pos = 0 + dynamics.pos
         shadow_pos[2] = 0.001 # avoid z-fighting
         matrix = r3d.translate(shadow_pos)
-        self.shadow_transform.set_transform(matrix)
-        if self.freespace is not None:
-            i, j = np.int32(dynamics.pos[:2])
-            collided = not self.freespace[i,j]
-        else:
-            collided = False
-        #if collided:
-            #print("Collided!")
-        #else:
-            #print("Free!")
+        self.shadow_transform.set_transform_nocollide(matrix)
+        collided = dynamics.crashed or self.detect_collision(dynamics)
+        if dynamics.crashed:
+            print("Collided with terrain!")
         return collided
+
+    def detect_collision(self, dynamics):
+        if self.freespace is None:
+            return False
+        i, j = np.int32(dynamics.pos[:2] + self.world_box / 2.0)
+        if self.freespace[i,j]:
+            return False
+        for o in self.obstacles:
+            # try to keep the camera from going inside obstacles
+            radius = dynamics.arm + 0.1
+            if o.collide_sphere(dynamics.pos, radius):
+                return True
+        return False
 
     def render_chase(self):
         assert self.have_state
-        self.cam3p.look_at(*self.chase_cam.look_at())
+        #self.cam3p.look_at(*self.chase_cam.look_at())
+        self.cam3p.look_at(*self.fpv_lookat)
         r3d.draw(self.scene, self.cam3p, self.window_target)
 
     def render_obs(self):
@@ -545,17 +559,17 @@ class QuadrotorVisionEnv(gym.Env):
 
     def _step(self, action):
         self.controller.step(self.dynamics, action, self.dt)
+        collided = self.scene.update_state(self.dynamics)
         reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
         self.tick += 1
-        done = self.tick > self.ep_len
+        done = collided or (self.tick > self.ep_len)
 
-        self.scene.update_state(self.dynamics)
         rgb = self.scene.render_obs()
 
         # for debugging:
         rgb = np.flip(rgb, axis=0)
-        plt.imshow(rgb)
-        plt.show()
+        #plt.imshow(rgb)
+        #plt.show()
 
         grey = (2.0 / 255.0) * np.mean(rgb, axis=2) - 1.0
         self.img_buf = np.roll(self.img_buf, -1, axis=2)
@@ -577,6 +591,8 @@ class QuadrotorVisionEnv(gym.Env):
         z = self.np_random.uniform(1, 3)
         pos = npa(x, y, z)
         vel = omega = npa(0, 0, 0)
+        vel = self.np_random.uniform(-20, 20, size=3)
+        vel[2] = 0
         #rotz = np.random.uniform(-np.pi, np.pi)
         #rotation = r3d.rotz(rotz)
         #rotation = rotation[:3,:3]
