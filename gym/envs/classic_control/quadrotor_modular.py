@@ -20,13 +20,11 @@ import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
 
 GRAV = 9.81
+TILES = 256 # number of tiles used for the obstacle map
 
 # numpy's cross is really slow for some reason
 def cross(a, b):
     return np.array([a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]])
-
-def is_orthonormal(m):
-    return np.max(np.abs(np.matmul(m, m.T) - np.eye(3)).flatten()) < 0.00001
 
 def normalize(x):
     n = norm(x)
@@ -46,6 +44,7 @@ def rand_uniform_rot3d(np_random):
     left = normalize(cross(up, fwd))
     up = cross(fwd, left)
     rot = np.hstack([fwd, left, up])
+    return rot
 
 def npa(*args):
     return np.array(args)
@@ -85,7 +84,6 @@ class QuadrotorDynamics(object):
             assert v.shape == (3,)
         assert thrusts.shape == (4,)
         assert rotation.shape == (3,3)
-        assert is_orthonormal(rotation)
         self.pos = deepcopy(position)
         self.vel = deepcopy(velocity)
         self.acc = np.zeros(3)
@@ -93,7 +91,6 @@ class QuadrotorDynamics(object):
         self.rot = deepcopy(rotation)
         self.omega = deepcopy(omega)
         self.thrusts = deepcopy(thrusts)
-        self.crashed = False
 
     # generate a random state (meters, meters/sec, radians/sec)
     def random_state(self, np_random, box, vel_max=15.0, omega_max=2*np.pi):
@@ -104,15 +101,6 @@ class QuadrotorDynamics(object):
         self.set_state(pos, vel, rot, omega)
 
     def step(self, thrust_cmds, dt):
-
-        if self.pos[2] <= self.arm:
-            # crashed, episode over
-            self.pos[2] = self.arm
-            self.vel *= 0
-            self.omega *= 0
-            self.crashed = True
-            return
-
         assert np.all(thrust_cmds >= 0)
         assert np.all(thrust_cmds <= 1)
         thrusts = self.thrust * thrust_cmds
@@ -219,8 +207,6 @@ def goal_seeking_reward(dynamics, goal, action, dt):
     # penalize yaw spin more
     loss_spin = 0.02 * norm2([1, 1, 10] * dynamics.omega)
 
-    loss_crash = 50 * dynamics.crashed
-
     loss_effort = 0.02 * norm2(action)
 
     # TODO this is too hacky, try not to use it
@@ -231,7 +217,7 @@ def goal_seeking_reward(dynamics, goal, action, dt):
 
     reward = -dt * np.sum([
         -reward_goal,
-        loss_pos, loss_vel_away, loss_alt, loss_spin, loss_crash, loss_effort])
+        loss_pos, loss_vel_away, loss_alt, loss_spin, loss_effort])
 
     return reward
 
@@ -254,7 +240,6 @@ class ChaseCamera(object):
         veln, n = normalize(self.vel_smooth)
         up = npa(0, 0, 1)
         ideal_vel, _ = normalize(-self.pos_smooth)
-        #ideal_vel = veln # DEBUG for not looking at goal
         if True or np.abs(veln[2]) > 0.95 or n < 0.01 or np.dot(veln, ideal_vel) < 0.7:
             # look towards goal even though we are not heading there
             right, _ = normalize(cross(ideal_vel, up))
@@ -272,17 +257,22 @@ class ChaseCamera(object):
         return eye, center, up
 
 
-def place_obstacles(N, box, radius_range, our_radius, tries=5):
-    t = np.linspace(0, box, 257)[:-1]
-    scale = box / 256.0
+# determine where to put the obstacles such that the center is a free space
+# for our initial state, and no two obstacles intersect.
+# compute a list of obstacles to collision check at each 2d tile.
+def _place_obstacles(N, box, radius_range, our_radius, tries=5):
+
+    t = np.linspace(0, box, TILES+1)[:-1]
+    scale = box / float(TILES)
     x, y = np.meshgrid(t, t)
     pts = np.zeros((N, 3))
-    # initialize with 1m ball around center for quadrotor
+    # ball around center is occupied so we don't spawn inside an obstacle
     dist = np.sqrt((x - box/2.0)**2 + (y - box/2.0)**2) - 4.0 * our_radius
-    # actually diameters...
+
     radii = np.random.uniform(*radius_range, size=N)
     radii = np.sort(radii)[::-1]
-    test_list = [[] for i in range(256 * 256)]
+    test_list = [[] for i in range(TILES**2)]
+
     for i in range(N):
         rad = radii[i]
         ok = np.array(np.where(dist.flat > rad)).flatten()
@@ -302,28 +292,30 @@ def place_obstacles(N, box, radius_range, our_radius, tries=5):
             test_list[ind1d].append(i)
         dist = np.minimum(dist, d)
         pts[i,:2] = pt - box/2.0
-        pts[i,2] = rad / 2.0
+        pts[i,2] = rad
 
     # very coarse to allow for binning bugs
-    test_list = np.array(test_list).reshape((256, 256))
+    test_list = np.array(test_list).reshape((TILES, TILES))
     amt_free = sum(len(a) == 0 for a in test_list.flat) / float(test_list.size)
     print(amt_free * 100, "pct free space")
     return pts, radii, test_list
 
+# generate N obstacles w/ randomized primitive, size, color, TODO texture
+# arena: boundaries of world in xy plane
+# our_radius: quadrotor's radius
 def _random_obstacles(N, arena, our_radius):
-    # all primitives should be around 1x1x1 meter sitting on xy-plane
-    boxside = np.sqrt(2) / 2.0
+    # all primitives should be tightly bound by unit circle in xy plane
+    boxside = np.sqrt(2)
     box = r3d.box(boxside, boxside, boxside)
-    sphere = r3d.sphere(radius=0.5, facets=16)
-    cylinder = r3d.cylinder(radius=0.5, height=1.0, sections=32)
+    sphere = r3d.sphere(radius=1.0, facets=16)
+    cylinder = r3d.cylinder(radius=1.0, height=2.0, sections=32)
     # TODO cone-sphere collision
     #cone = r3d.cone(radius=0.5, height=1.0, sections=32)
-
     primitives = [box, sphere, cylinder]
 
     bodies = []
-    max_radius = 6.0
-    positions, radii, test_list = place_obstacles(
+    max_radius = 3.0
+    positions, radii, test_list = _place_obstacles(
         N, arena, (0.5, max_radius), our_radius)
     for i in range(N):
         primitive = np.random.choice(primitives)
@@ -342,13 +334,14 @@ def _random_obstacles(N, arena, our_radius):
 
     return bodies, test_list
 
+
 class Quadrotor3DScene(object):
     def __init__(self, goal, dynamics, w, h, resizable, obstacles=True, visible=True):
 
         self.window_target = r3d.WindowTarget(w, h, resizable=resizable)
         self.obs_target = r3d.FBOTarget(64, 64)
         self.cam1p = r3d.Camera(fov=90.0)
-        self.cam3p = r3d.Camera(fov=95.0)
+        self.cam3p = r3d.Camera(fov=45.0)
 
         self.chase_cam = ChaseCamera(dynamics.pos, dynamics.vel)
         self.world_box = 40.0
@@ -422,15 +415,18 @@ class Quadrotor3DScene(object):
         shadow_pos[2] = 0.001 # avoid z-fighting
         matrix = r3d.translate(shadow_pos)
         self.shadow_transform.set_transform_nocollide(matrix)
-        collided = dynamics.crashed or self.detect_collision(dynamics)
-        if dynamics.crashed:
-            print("Collided with terrain!")
+        collided = self.detect_collision(dynamics)
         return collided
 
     def detect_collision(self, dynamics):
-        tile_index = (256.0 / self.world_box) * np.int32(dynamics.pos[:2] + self.world_box / 2.0)
+        if dynamics.pos[2] <= dynamics.arm:
+            print("Collided with terrain")
+            return True
+        scale = float(TILES) / self.world_box
+        # allowing us to be a little sloppy about tile <=> coord mapping
+        tile_index = scale * np.int32(dynamics.pos[:2] + self.world_box / 2.0)
         i, j = np.int32(tile_index)
-        if j < 0 or i < 0 or i >= 256 or j >= 256:
+        if j < 0 or i < 0 or i >= TILES or j >= TILES:
             print("Collided with wall!")
             return True
         if self.test_list is not None:
@@ -479,6 +475,7 @@ class QuadrotorEnv(gym.Env):
         self.ep_len = 1000
         self.tick = 0
         self.dt = 1.0 / 50.0
+        self.crashed = False
 
         self._seed()
 
@@ -491,10 +488,12 @@ class QuadrotorEnv(gym.Env):
         return [seed]
 
     def _step(self, action):
-        self.controller.step(self.dynamics, action, self.dt)
-        if self.scene is not None:
-            self.scene.update_state(self.dynamics)
-        reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
+        if not self.crashed:
+            self.controller.step(self.dynamics, action, self.dt)
+            self.crashed = self.scene.update_state(self.dynamics)
+            reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
+        else:
+            reward = -50
         self.tick += 1
         done = self.tick > self.ep_len
         sv = self.dynamics.state_vector()
@@ -515,6 +514,7 @@ class QuadrotorEnv(gym.Env):
         #rotation = rotation[:3,:3]
         rotation = np.eye(3)
         self.dynamics.set_state(pos, vel, rotation, omega)
+        self.crashed = False
         self.tick = 0
         return self.dynamics.state_vector()
 
@@ -522,7 +522,6 @@ class QuadrotorEnv(gym.Env):
         if self.scene is None:
             self.scene = Quadrotor3DScene(self.goal, self.dynamics,
                 640, 480, resizable=True, obstacles=False)
-        self.scene.update_state(self.dynamics)
         self.scene.render_chase()
 
 
@@ -538,6 +537,7 @@ class QuadrotorVisionEnv(gym.Env):
         self.controller = ShiftedMotorControl(self.dynamics)
         self.action_space = self.controller.action_space(self.dynamics)
         self.scene = None
+        self.crashed = False
 
         seq_len = 4
         img_w, img_h = 64, 64
@@ -563,16 +563,18 @@ class QuadrotorVisionEnv(gym.Env):
         return [seed]
 
     def _step(self, action):
-        self.controller.step(self.dynamics, action, self.dt)
-        collided = self.scene.update_state(self.dynamics)
-        reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
+        if not self.crashed:
+            self.controller.step(self.dynamics, action, self.dt)
+            self.crashed = self.scene.update_state(self.dynamics)
+            reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
+        else:
+            reward = -50
         self.tick += 1
-        done = collided or (self.tick > self.ep_len)
+        done = self.crashed or (self.tick > self.ep_len)
 
         rgb = self.scene.render_obs()
-
         # for debugging:
-        rgb = np.flip(rgb, axis=0)
+        #rgb = np.flip(rgb, axis=0)
         #plt.imshow(rgb)
         #plt.show()
 
@@ -603,11 +605,13 @@ class QuadrotorVisionEnv(gym.Env):
         #rotation = rotation[:3,:3]
         rotation = np.eye(3)
         self.dynamics.set_state(pos, vel, rotation, omega)
+        self.crashed = False
 
         if self.scene is None:
             self.scene = Quadrotor3DScene(self.goal, self.dynamics,
                 640, 480, resizable=True)
-        self.scene.update_state(self.dynamics)
+        collided = self.scene.update_state(self.dynamics)
+        assert not collided
 
         # fill the buffers with copies of initial state
         w, h, seq_len = self.img_buf.shape
