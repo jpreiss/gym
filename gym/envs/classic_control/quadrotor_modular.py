@@ -88,7 +88,6 @@ class QuadrotorDynamics(object):
         assert is_orthonormal(rotation)
         self.pos = deepcopy(position)
         self.vel = deepcopy(velocity)
-        print("velocity:", self.vel)
         self.acc = np.zeros(3)
         self.accelerometer = np.array([0, 0, GRAV])
         self.rot = deepcopy(rotation)
@@ -283,6 +282,7 @@ def place_obstacles(N, box, radius_range, our_radius, tries=5):
     # actually diameters...
     radii = np.random.uniform(*radius_range, size=N)
     radii = np.sort(radii)[::-1]
+    test_list = [[] for i in range(256 * 256)]
     for i in range(N):
         rad = radii[i]
         ok = np.array(np.where(dist.flat > rad)).flatten()
@@ -297,19 +297,23 @@ def place_obstacles(N, box, radius_range, our_radius, tries=5):
         pt = np.unravel_index(p, dist.shape)
         pt = scale * np.array(pt)
         d = np.sqrt((x - pt[1])**2 + (y - pt[0])**2) - rad
+        # big slop factor for tile size, off-by-one errors, etc
+        for ind1d in np.where(d.flat <= 2*our_radius + scale)[0]:
+            test_list[ind1d].append(i)
         dist = np.minimum(dist, d)
         pts[i,:2] = pt - box/2.0
         pts[i,2] = rad / 2.0
 
     # very coarse to allow for binning bugs
-    freespace = dist > 2 * our_radius
-    amt_free = sum(freespace.flat) / float(freespace.size)
+    test_list = np.array(test_list).reshape((256, 256))
+    amt_free = sum(len(a) == 0 for a in test_list.flat) / float(test_list.size)
     print(amt_free * 100, "pct free space")
-    return pts, radii, freespace
+    return pts, radii, test_list
 
 def _random_obstacles(N, arena, our_radius):
     # all primitives should be around 1x1x1 meter sitting on xy-plane
-    box = r3d.box(1, 1, 1)
+    boxside = np.sqrt(2) / 2.0
+    box = r3d.box(boxside, boxside, boxside)
     sphere = r3d.sphere(radius=0.5, facets=16)
     cylinder = r3d.cylinder(radius=0.5, height=1.0, sections=32)
     # TODO cone-sphere collision
@@ -319,7 +323,7 @@ def _random_obstacles(N, arena, our_radius):
 
     bodies = []
     max_radius = 6.0
-    positions, radii, freespace = place_obstacles(
+    positions, radii, test_list = place_obstacles(
         N, arena, (0.5, max_radius), our_radius)
     for i in range(N):
         primitive = np.random.choice(primitives)
@@ -336,7 +340,7 @@ def _random_obstacles(N, arena, our_radius):
                 r3d.Color(color, primitive))
         bodies.append(body)
 
-    return bodies, freespace
+    return bodies, test_list
 
 class Quadrotor3DScene(object):
     def __init__(self, goal, dynamics, w, h, resizable, obstacles=True, visible=True):
@@ -363,11 +367,11 @@ class Quadrotor3DScene(object):
             (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
 
         if obstacles:
-            self.obstacles, self.freespace = (
+            self.obstacles, self.test_list = (
                 _random_obstacles(30, self.world_box, dynamics.arm))
         else:
             self.obstacles = []
-            self.freespace = None
+            self.test_list = None
 
         world = r3d.World([
             r3d.BackToFront([floor, self.shadow_transform]),
@@ -424,22 +428,23 @@ class Quadrotor3DScene(object):
         return collided
 
     def detect_collision(self, dynamics):
-        if self.freespace is None:
-            return False
-        i, j = np.int32(dynamics.pos[:2] + self.world_box / 2.0)
-        if self.freespace[i,j]:
-            return False
-        for o in self.obstacles:
-            # try to keep the camera from going inside obstacles
-            radius = dynamics.arm + 0.1
-            if o.collide_sphere(dynamics.pos, radius):
-                return True
+        tile_index = (256.0 / self.world_box) * np.int32(dynamics.pos[:2] + self.world_box / 2.0)
+        i, j = np.int32(tile_index)
+        if j < 0 or i < 0 or i >= 256 or j >= 256:
+            print("Collided with wall!")
+            return True
+        if self.test_list is not None:
+            for ind in self.test_list[i,j]:
+                # try to keep the camera from going inside obstacles
+                radius = dynamics.arm + 0.1
+                if self.obstacles[ind].collide_sphere(dynamics.pos, radius):
+                    return True
         return False
 
     def render_chase(self):
         assert self.have_state
-        #self.cam3p.look_at(*self.chase_cam.look_at())
-        self.cam3p.look_at(*self.fpv_lookat)
+        self.cam3p.look_at(*self.chase_cam.look_at())
+        #self.cam3p.look_at(*self.fpv_lookat)
         r3d.draw(self.scene, self.cam3p, self.window_target)
 
     def render_obs(self):
