@@ -63,6 +63,11 @@ def hinge_loss(x, loss_above):
     except TypeError:
         return max(0, x - loss_above)
 
+def clamp_norm(x, maxnorm):
+    n = np.linalg.norm(x)
+    return x if n <= maxnorm else (maxnorm / n) * x
+
+
 class QuadrotorDynamics(object):
     # thrust_to_weight is the total, it will be divided among the 4 props
     # torque_to_thrust is ratio of torque produced by prop to thrust
@@ -640,23 +645,10 @@ class QuadrotorVisionEnv(gym.Env):
         self.imu_buf = np.roll(self.imu_buf, -1, axis=1)
         self.imu_buf[:,-1] = imu
 
-        # heading measurement
-        fwd = self.dynamics.rot[:,0]
-        fwd[2] = 0.0
-        fwd, mag = normalize(fwd)
-        if mag < 0.2:
-            # we are almost at a singularity, heading angle no longer meaningful
-            dir = np.zeros(2)
-        else:
-            left = cross([0, 0, 1], fwd)
-            rot_flat = np.column_stack([fwd, left, npa(0, 0, 1)])
-            to_goal = self.goal - self.dynamics.pos
-            to_goal[2] = 0.0
-            goal_dir, dist = normalize(to_goal)
-            # clamp the size of this vector - 
-            # once we're far away, distance doesn't matter anymore
-            dir = min(dist, 4.0) * np.matmul(rot_flat.T, goal_dir)[:2]
-
+        # heading measurement - simplified, #95489c has a more nuanced version
+        our_gps = self.dynamics.pos[:2]
+        goal_gps = self.goal[:2]
+        dir = clampnorm(goal_gps - our_gps)
         self.dir_buf = np.roll(self.dir_buf, -1, axis=1)
         self.dir_buf[:,-1] = dir
 
