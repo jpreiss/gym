@@ -203,8 +203,43 @@ class ShiftedMotorControl(object):
         action[action > 1] = 1
         dynamics.step(action, dt)
 
+# P-only linear controller on angular velocity.
+# direct (ignoring motor lag) control of thrust magnitude.
+class OmegaThrustControl(object):
+    def __init__(self, dynamics):
+        # jacobian of (acceleration magnitude, angular acceleration)
+        #       w.r.t (normalized motor thrusts) in range [0, 1]
+        torque = dynamics.thrust * dynamics.prop_crossproducts.T
+        torque[2,:] = dynamics.torque * dynamics.prop_ccw
+        thrust = dynamics.thrust * np.ones((1,4))
+        dw = (1.0 / dynamics.inertia)[:,None] * torque
+        dv = thrust / dynamics.mass
+        jacobian = np.vstack([dv, dw])
+        assert np.linalg.cond(jacobian) < 25.0
+        self.Jinv = np.linalg.inv(jacobian)
+
+    def action_space(self, dynamics):
+        circle_per_sec = 2 * np.pi
+        max_rp = 5 * circle_per_sec
+        max_yaw = 1 * circle_per_sec
+        min_g = -1.0
+        max_g = dynamics.thrust_to_weight - 1.0
+        low  = npa(min_g, -max_rp, -max_rp, -max_yaw)
+        high = npa(max_g,  max_rp,  max_rp,  max_yaw)
+        return spaces.Box(low, high)
+
+    def step(self, dynamics, action, dt):
+        kp = 5.0 # could be more aggressive
+        omega_err = dynamics.omega - action[1:]
+        dw_des = -kp * omega_err
+        acc_des = GRAV * (action[0] + 1.0)
+        des = np.append(acc_des, dw_des)
+        thrusts = np.matmul(self.Jinv, des)
+        thrusts[thrusts < 0] = 0
+        thrusts[thrusts > 1] = 1
+        dynamics.step(thrusts, dt)
+
 # TODO:
-# class AttitudeRateControl
 # class AttitudeControl
 # class VelocityControl
 
@@ -433,13 +468,14 @@ class Quadrotor3DScene(object):
             (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
 
         self.map = None
+        bodies = [r3d.BackToFront([floor, self.shadow_transform]),
+            self.goal_transform, self.quad_transform]
+
         if obstacles:
             self.map = _random_obstacles(np_random, 30, self.world_box, quad_arm)
+            self.bodies += self.map.bodies
 
-        world = r3d.World([
-            r3d.BackToFront([floor, self.shadow_transform]),
-            self.goal_transform, self.quad_transform]
-            + self.map.bodies)
+        world = r3d.World(bodies)
         batch = r3d.Batch()
         world.build(batch)
 
@@ -493,7 +529,10 @@ class Quadrotor3DScene(object):
         matrix = r3d.translate(shadow_pos)
         self.shadow_transform.set_transform_nocollide(matrix)
 
-        collided = self.map.detect_collision(dynamics)
+        if self.map is not None:
+            collided = self.map.detect_collision(dynamics)
+        else:
+            collided = dynamics.pos[2] <= dynamics.arm
         return collided
 
     def render_chase(self):
@@ -518,7 +557,8 @@ class QuadrotorEnv(gym.Env):
     def __init__(self):
         np.seterr(under='ignore')
         self.dynamics = default_dynamics()
-        self.controller = ShiftedMotorControl(self.dynamics)
+        #self.controller = ShiftedMotorControl(self.dynamics)
+        self.controller = OmegaThrustControl(self.dynamics)
         self.action_space = self.controller.action_space(self.dynamics)
         self.scene = None
 
@@ -531,7 +571,7 @@ class QuadrotorEnv(gym.Env):
         self.observation_space = spaces.Box(-obs_high, obs_high)
 
         # TODO get this from a wrapper
-        self.ep_len = 1000
+        self.ep_len = 256
         self.tick = 0
         self.dt = 1.0 / 50.0
         self.crashed = False
@@ -552,17 +592,19 @@ class QuadrotorEnv(gym.Env):
             self.crashed = self.scene.update_state(self.dynamics)
             reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
         else:
-            reward = -50
+            reward = -self.dt * 100
         self.tick += 1
-        done = self.tick > self.ep_len
+        done = self.tick > self.ep_len# or self.crashed
         sv = self.dynamics.state_vector()
         return sv, reward, done, {}
 
     def _reset(self):
+        if self.scene is None:
+            self.scene = Quadrotor3DScene(None, self.dynamics.arm,
+                640, 480, resizable=True, obstacles=False)
+
         self.goal = npa(0, 0, 2)
         x, y = self.np_random.uniform(-self.box, self.box, size=(2,))
-        x = -abs(x)
-        y = 0
         if self.box < 20:
             self.box *= 1.0003 # x20 after 10000 resets
         z = self.np_random.uniform(1, 3)
@@ -573,14 +615,15 @@ class QuadrotorEnv(gym.Env):
         #rotation = rotation[:3,:3]
         rotation = np.eye(3)
         self.dynamics.set_state(pos, vel, rotation, omega)
+
+        self.scene.reset(self.goal, self.dynamics)
+        self.scene.update_state(self.dynamics)
+
         self.crashed = False
         self.tick = 0
         return self.dynamics.state_vector()
 
     def _render(self, mode='human', close=False):
-        if self.scene is None:
-            self.scene = Quadrotor3DScene(self.goal, self.dynamics,
-                640, 480, resizable=True, obstacles=False)
         self.scene.render_chase()
 
 
@@ -593,7 +636,8 @@ class QuadrotorVisionEnv(gym.Env):
     def __init__(self):
         np.seterr(under='ignore')
         self.dynamics = default_dynamics()
-        self.controller = ShiftedMotorControl(self.dynamics)
+        #self.controller = ShiftedMotorControl(self.dynamics)
+        self.controller = OmegaThrustControl(self.dynamics)
         self.action_space = self.controller.action_space(self.dynamics)
         self.scene = None
         self.crashed = False
@@ -648,7 +692,7 @@ class QuadrotorVisionEnv(gym.Env):
         # heading measurement - simplified, #95489c has a more nuanced version
         our_gps = self.dynamics.pos[:2]
         goal_gps = self.goal[:2]
-        dir = clampnorm(goal_gps - our_gps)
+        dir = clamp_norm(goal_gps - our_gps, 4.0)
         self.dir_buf = np.roll(self.dir_buf, -1, axis=1)
         self.dir_buf[:,-1] = dir
 
@@ -663,7 +707,7 @@ class QuadrotorVisionEnv(gym.Env):
         pos = self.scene.map.sample_start(self.np_random)
         vel = omega = npa(0, 0, 0)
         # for debugging collisions w/ no policy:
-        vel = self.np_random.uniform(-20, 20, size=3)
+        #vel = self.np_random.uniform(-20, 20, size=3)
         vel[2] = 0
         #rotz = np.random.uniform(-np.pi, np.pi)
         #rotation = r3d.rotz(rotz)
