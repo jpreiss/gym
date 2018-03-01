@@ -203,19 +203,23 @@ class ShiftedMotorControl(object):
         action[action > 1] = 1
         dynamics.step(action, dt)
 
+# jacobian of (acceleration magnitude, angular acceleration)
+#       w.r.t (normalized motor thrusts) in range [0, 1]
+def quadrotor_jacobian(dynamics):
+    torque = dynamics.thrust * dynamics.prop_crossproducts.T
+    torque[2,:] = dynamics.torque * dynamics.prop_ccw
+    thrust = dynamics.thrust * np.ones((1,4))
+    dw = (1.0 / dynamics.inertia)[:,None] * torque
+    dv = thrust / dynamics.mass
+    J = np.vstack([dv, dw])
+    assert np.linalg.cond(J) < 25.0
+    return J
+
 # P-only linear controller on angular velocity.
 # direct (ignoring motor lag) control of thrust magnitude.
 class OmegaThrustControl(object):
     def __init__(self, dynamics):
-        # jacobian of (acceleration magnitude, angular acceleration)
-        #       w.r.t (normalized motor thrusts) in range [0, 1]
-        torque = dynamics.thrust * dynamics.prop_crossproducts.T
-        torque[2,:] = dynamics.torque * dynamics.prop_ccw
-        thrust = dynamics.thrust * np.ones((1,4))
-        dw = (1.0 / dynamics.inertia)[:,None] * torque
-        dv = thrust / dynamics.mass
-        jacobian = np.vstack([dv, dw])
-        assert np.linalg.cond(jacobian) < 25.0
+        jacobian = quadrotor_jacobian(dynamics)
         self.Jinv = np.linalg.inv(jacobian)
 
     def action_space(self, dynamics):
@@ -239,11 +243,111 @@ class OmegaThrustControl(object):
         thrusts[thrusts > 1] = 1
         dynamics.step(thrusts, dt)
 
+
+class VelocityYawControl(object):
+    def __init__(self, dynamics):
+        jacobian = quadrotor_jacobian(dynamics)
+        self.Jinv = np.linalg.inv(jacobian)
+
+    def action_space(self, dynamics):
+        vmax = 20.0 # meters / sec
+        dymax = 4 * np.pi # radians / sec
+        high = npa(vmax, vmax, vmax, dymax)
+        return spaces.Box(-high, high)
+
+    def step(self, dynamics, action, dt):
+        # needs to be much bigger than in normal controller
+        # so the random initial actions in RL create some signal
+        kp_v = 5.0
+        kp_a, kd_a = 100.0, 50.0
+
+        e_v = dynamics.vel - action[:3]
+        acc_des = -kp_v * e_v + npa(0, 0, GRAV)
+
+        # rotation towards the ideal thrust direction
+        # see Mellinger and Kumar 2011
+        R = dynamics.rot
+        zb_des, _ = normalize(acc_des)
+        yb_des, _ = normalize(cross(zb_des, R[:,0]))
+        xb_des    = cross(yb_des, zb_des)
+        R_des = np.column_stack((xb_des, yb_des, zb_des))
+
+        def vee(R):
+            return npa(R[2,1], R[0,2], R[1,0])
+        e_R = 0.5 * vee(np.matmul(R_des.T, R) - np.matmul(R.T, R_des))
+        omega_des = npa(0, 0, action[3])
+        e_w = dynamics.omega - omega_des
+
+        dw_des = -kp_a * e_R - kd_a * e_w
+        # we want this acceleration, but we can only accelerate in one direction!
+        thrust_mag = np.dot(acc_des, dynamics.rot[:,2])
+
+        des = np.append(thrust_mag, dw_des)
+        thrusts = np.matmul(self.Jinv, des)
+        thrusts[thrusts < 0] = 0
+        thrusts[thrusts > 1] = 1
+        dynamics.step(thrusts, dt)
+
+
+class NonlinearPositionController2(object):
+    def __init__(self, dynamics):
+        self.vel = VelocityYawControl(dynamics)
+
+    def step(self, dynamics, goal, dt):
+        kv = 1.2
+        v_des = -kv * clamp_norm(dynamics.pos - goal, 4.0)
+
+        x, y, _ = dynamics.rot[:,0]
+        theta = np.arctan2(y, x)
+        ky = 0.0
+        vy_des = -ky * theta
+
+        action = np.append(v_des, vy_des)
+        self.vel.step(dynamics, action, dt)
+
+
+class NonlinearPositionController(object):
+    def __init__(self, dynamics):
+        jacobian = quadrotor_jacobian(dynamics)
+        self.Jinv = np.linalg.inv(jacobian)
+
+    def step(self, dynamics, goal, dt):
+        kp_p, kd_p = 5.0, 4.0
+        kp_a, kd_a = 100.0, 50.0
+
+        e_p = clamp_norm(dynamics.pos - goal, 4.0)
+        e_v = dynamics.vel
+        acc_des = -kp_p * e_p - kd_p * e_v + npa(0, 0, GRAV)
+
+        # rotation towards the ideal thrust direction
+        # see Mellinger and Kumar 2011
+        zb_des, _ = normalize(acc_des)
+        yb_des, _ = normalize(cross(zb_des, [1, 0, 0]))
+        xb_des    = cross(yb_des, zb_des)
+        R_des = np.column_stack((xb_des, yb_des, zb_des))
+        R = dynamics.rot
+
+        def vee(R):
+            return npa(R[2,1], R[0,2], R[1,0])
+        e_R = 0.5 * vee(np.matmul(R_des.T, R) - np.matmul(R.T, R_des))
+        e_w = dynamics.omega
+
+        dw_des = -kp_a * e_R - kd_a * e_w
+        # we want this acceleration, but we can only accelerate in one direction!
+        thrust_mag = np.dot(acc_des, dynamics.rot[:,2])
+
+        des = np.append(thrust_mag, dw_des)
+        thrusts = np.matmul(self.Jinv, des)
+        thrusts[thrusts < 0] = 0
+        thrusts[thrusts > 1] = 1
+        dynamics.step(thrusts, dt)
+
+
 # TODO:
 # class AttitudeControl
 # class VelocityControl
 
-def goal_seeking_reward(dynamics, goal, action, dt):
+def bulky_goal_seeking_reward(dynamics, goal, action, dt):
     vel = dynamics.vel
     to_goal = -dynamics.pos
 
@@ -274,6 +378,21 @@ def goal_seeking_reward(dynamics, goal, action, dt):
         -reward_goal,
         loss_pos, loss_vel_away, loss_alt, loss_spin, loss_effort])
 
+    return reward
+
+def goal_seeking_reward(dynamics, goal, action, dt):
+    # log to create a sharp peak at the goal
+    dist = np.linalg.norm(goal - dynamics.pos)
+    loss_pos = np.log(dist + 0.1) + 0.1 * dist
+
+    # penalize altitude above this threshold
+    max_alt = 6.0
+    loss_alt = np.exp(2*(dynamics.pos[2] - max_alt))
+
+    # penalize amount of control effort
+    loss_effort = 0.0 * np.linalg.norm(action)
+
+    reward = -dt * np.sum([loss_pos, loss_alt, loss_effort])
     return reward
 
 
@@ -559,8 +678,11 @@ class QuadrotorEnv(gym.Env):
         self.dynamics = default_dynamics()
         #self.controller = ShiftedMotorControl(self.dynamics)
         self.controller = OmegaThrustControl(self.dynamics)
+        #self.controller = VelocityYawControl(self.dynamics)
         self.action_space = self.controller.action_space(self.dynamics)
         self.scene = None
+
+        self.oracle = NonlinearPositionController(self.dynamics)
 
         # pos, vel, rot, omega
         obs_dim = 3 + 3 + 9 + 3
@@ -589,6 +711,7 @@ class QuadrotorEnv(gym.Env):
     def _step(self, action):
         if not self.crashed:
             self.controller.step(self.dynamics, action, self.dt)
+            #self.oracle.step(self.dynamics, self.goal, self.dt)
             self.crashed = self.scene.update_state(self.dynamics)
             reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
         else:
@@ -605,11 +728,14 @@ class QuadrotorEnv(gym.Env):
 
         self.goal = npa(0, 0, 2)
         x, y = self.np_random.uniform(-self.box, self.box, size=(2,))
-        if self.box < 20:
+        if self.box < 6:
             self.box *= 1.0003 # x20 after 10000 resets
         z = self.np_random.uniform(1, 3)
         pos = npa(x, y, z)
+        #pos = npa(0,0,2)
         vel = omega = npa(0, 0, 0)
+        #vel = self.np_random.uniform(-2, 2, size=3)
+        #vel[2] *= 0.1
         #rotz = np.random.uniform(-np.pi, np.pi)
         #rotation = r3d.rotz(rotz)
         #rotation = rotation[:3,:3]
