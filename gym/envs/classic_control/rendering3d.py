@@ -135,11 +135,7 @@ class Camera(object):
         self.lookat = None
 
     def look_at(self, eye, target, up):
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
         self.lookat = (eye, target, up)
-        eye, target, up = list(eye), list(target), list(up)
-        gluLookAt(*(eye + target + up))
 
     # TODO other ways to set the view matrix
 
@@ -168,20 +164,22 @@ class Scene(object):
         self.batches = batches
         self.bgcolor = bgcolor
 
+        # [-1] == 0 means it's a directional light
+        self.lights = [np.array([np.cos(t), np.sin(t), 0.0, 0.0])
+            for t in 0.2 + np.linspace(0, 2*np.pi, 4)[:-1]]
+
     # call only once GL context is ready
     def initialize(self):
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
-        glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(40.0, 100.0, 60.0, 1))
-        glLightfv(GL_LIGHT0, GL_AMBIENT, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, (GLfloat * 4)(0.8, 0.8, 0.8, 1))
-        glLightfv(GL_LIGHT0, GL_SPECULAR, (GLfloat * 4)(0.4, 0.4, 0.4, 1))
-        glEnable(GL_LIGHT0)
-        glLightfv(GL_LIGHT1, GL_POSITION, (GLfloat * 4)(-200, -40.0, -20.0, 1))
-        glLightfv(GL_LIGHT1, GL_AMBIENT, (GLfloat * 4)(0.1, 0.1, 0.1, 1))
-        glLightfv(GL_LIGHT1, GL_DIFFUSE, (GLfloat * 4)(0.5, 0.5, 0.5, 1))
-        glLightfv(GL_LIGHT1, GL_SPECULAR, (GLfloat * 4)(0.2, 0.2, 0.2, 1))
-        glEnable(GL_LIGHT1)
+        amb, diff, spec = (1.0 / len(self.lights)) * np.array([0.4, 1.2, 0.9])
+        for i, light in enumerate(self.lights):
+            # TODO fix lights in world space instead of camera space
+            glLightfv(GL_LIGHT0 + i, GL_POSITION, (GLfloat * 4)(*light))
+            glLightfv(GL_LIGHT0 + i, GL_AMBIENT, (GLfloat * 4)(amb, amb, amb, 1))
+            glLightfv(GL_LIGHT0 + i, GL_DIFFUSE, (GLfloat * 4)(diff, diff, diff, 1))
+            glLightfv(GL_LIGHT0 + i, GL_SPECULAR, (GLfloat * 4)(spec, spec, spec, 1))
+            glEnable(GL_LIGHT0 + i)
 
 
 def draw(scene, camera, target):
@@ -191,10 +189,15 @@ def draw(scene, camera, target):
     r, g, b = scene.bgcolor
     glClearColor(r, g, b, 1.0)
     glFrontFace(GL_CCW)
+    glCullFace(GL_BACK)
+    glEnable(GL_CULL_FACE);
     glEnable(GL_DEPTH_TEST)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
     camera._matrix(target.shape)
+    #view = (GLfloat * 16)()
+    #glGetFloatv(GL_MODELVIEW_MATRIX, view)
+    #view = np.array(view).reshape((4,4)).T
 
     for batch in scene.batches:
         batch.draw()
@@ -389,7 +392,6 @@ class _PygTransform(pyglet.graphics.Group):
         self.matrix_raw = (GLfloat * 16)(*transform.T.flatten())
 
     def set_state(self):
-        glMatrixMode(GL_MODELVIEW)
         glPushMatrix()
         glMultMatrixf(self.matrix_raw)
 
@@ -421,7 +423,8 @@ class _PygColor(pyglet.graphics.Group):
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, self.ccolor)
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, self.ccolor)
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(1, 1, 1, 1))
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SHININESS, (GLfloat)(8.0))
 
     def unset_state(self):
         if self.alpha() < 1:
@@ -467,6 +470,12 @@ class _PygAlphaBlending(pyglet.graphics.Group):
 
 Batch = pyglet.graphics.Batch
 
+# we only implement collision detection between primitives and spheres.
+# the world-coordinate sphere is transformed according to the scene graph
+# into the primitive's canonical coordinate system.
+# this simplifies the math a lot, although it might be less efficient
+# than directly testing the sphere against the transformed primitive
+# in world coordinates.
 class SphereCollision(object):
     def __init__(self, radius):
         self.radius = radius
@@ -648,13 +657,16 @@ def cylinder_strip(radius, height, sections):
 
     base = np.hstack([x, y, 0*t])
     top = np.hstack([x, y, height + 0*t])
-    strip_sides = _to_strip(np.hstack([top[:,None,:], base[:,None,:]]))
+    strip_sides = _to_strip(np.hstack([base[:,None,:], top[:,None,:]]))
     normals_sides = _withz(strip_sides / radius, 0)
 
     def make_cap(circle, normal_z):
         height = circle[0,2]
         center = _withz(0 * circle, height)
-        strip = _to_strip(np.hstack([center[:,None,:], circle[:,None,:]]))
+        if normal_z > 0:
+            strip = _to_strip(np.hstack([circle[:,None,:], center[:,None,:]]))
+        else:
+            strip = _to_strip(np.hstack([center[:,None,:], circle[:,None,:]]))
         normals = _withz(0 * strip, normal_z)
         return strip, normals
 
@@ -672,7 +684,7 @@ def cone_strip(radius, height, sections):
     base = np.hstack([x, y, 0*t])
 
     top = _withz(0 * base, height)
-    vside = _to_strip(np.hstack([top[:,None,:], base[:,None,:]]))
+    vside = _to_strip(np.hstack([base[:,None,:], top[:,None,:]]))
     base_tangent = np.cross(_npa(0, 0, 1), base)
     top_to_base = base - top
     normals = _normalize(np.cross(top_to_base, base_tangent))
@@ -682,7 +694,7 @@ def cone_strip(radius, height, sections):
     vbase = _to_strip(np.hstack([base_ctr[:,None,:], base[:,None,:]]))
     nbase = _withz(0 * vbase, -1)
 
-    return np.vstack([vside]), np.vstack([nside])
+    return np.vstack([vside, vbase]), np.vstack([nside, nbase])
 
 # sphere centered on origin
 def sphere_strip(radius, resolution):
@@ -696,7 +708,7 @@ def sphere_strip(radius, resolution):
         panel[:,:,inds[1]] = v
         panel[:,:,inds[2]] = 1
         norms = np.linalg.norm(panel, axis=2)
-        panel = panel / np.tile(norms[:,:,None], (1, 1, 3))
+        panel = panel / norms[:,:,None]
         for _ in range(2):
             for j in range(resolution - 1):
                 strip = deepcopy(panel[[j,j+1],:,:].transpose([1,0,2]).reshape((-1,3)))
@@ -704,6 +716,7 @@ def sphere_strip(radius, resolution):
                 degen1 = deepcopy(strip[-1,:])
                 vtx.extend([degen0, strip, degen1])
             panel *= -1
+            panel = np.flip(panel, axis=1)
         inds = [inds[-1]] + inds[:-1]
 
     n = np.vstack(vtx)
@@ -772,3 +785,5 @@ def _np2tex(a):
     assert len(b) == w * h
     img = pyglet.image.ImageData(w, h, "L", b)
     return img.get_texture()
+
+

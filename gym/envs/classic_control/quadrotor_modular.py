@@ -584,7 +584,7 @@ class Quadrotor3DScene(object):
             r3d.rect((1000, 1000), (0, 100), (0, 100)))
 
         self.goal_transform = r3d.transform_and_color(np.eye(4),
-            (0.5, 0.4, 0), r3d.sphere(diameter/2, 18))
+            (0.85, 0.55, 0), r3d.sphere(diameter/2, 18))
 
         self.map = None
         bodies = [r3d.BackToFront([floor, self.shadow_transform]),
@@ -611,19 +611,19 @@ class Quadrotor3DScene(object):
         deltas = ((rr, rr, 0), (rr, -rr, 0), (-rr, -rr, 0), (-rr, rr, 0))
         colors = ((1,0,0), (1,0,0), (0,1,0), (0,1,0))
         def disc(translation, color):
-            color = 0.3 * np.array(list(color)) + 0.2
+            color = 0.5 * np.array(list(color)) + 0.2
             disc = r3d.transform_and_color(r3d.translate(translation), color,
                 r3d.cylinder(prop_r, prop_h, 32))
             return disc
         props = [disc(d, c) for d, c in zip(deltas, colors)]
 
         arm_thicc = diam / 20.0
-        arm_color = (0.5, 0.5, 0.5)
+        arm_color = (0.6, 0.6, 0.6)
         arms = r3d.transform_and_color(
             np.matmul(r3d.translate((0, 0, -arm_thicc)), r3d.rotz(np.pi / 4)), arm_color,
             [r3d.box(diam/10, diam, arm_thicc), r3d.box(diam, diam/10, arm_thicc)])
 
-        arrow = r3d.Color((0.3, 0.3, 1.0), r3d.arrow(0.12*prop_r, 2.5*prop_r, 16))
+        arrow = r3d.Color((0.2, 0.3, 0.9), r3d.arrow(0.12*prop_r, 2.5*prop_r, 16))
 
         bodies = props + [arms, arrow]
         self.have_state = False
