@@ -94,6 +94,7 @@ class QuadrotorDynamics(object):
         self.prop_crossproducts = np.cross(self.prop_pos, [0, 0, 1])
         # 1 for props turning CCW, -1 for CW
         self.prop_ccw = np.array([1, -1, 1, -1])
+        self.since_last_svd = 0
 
     # pos, vel, in world coords
     # rotation is (body coords) -> (world coords)
@@ -120,10 +121,10 @@ class QuadrotorDynamics(object):
         self.set_state(pos, vel, rot, omega)
 
     def step(self, thrust_cmds, dt):
-        assert np.all(thrust_cmds >= 0)
-        assert np.all(thrust_cmds <= 1)
+        # uncomment for debugging. they are slow
+        #assert np.all(thrust_cmds >= 0)
+        #assert np.all(thrust_cmds <= 1)
         thrusts = self.thrust * thrust_cmds
-        thrust = npa(0,0,np.sum(thrusts))
         torques = self.prop_crossproducts * thrusts[:,None]
         torques[:,2] += self.torque * self.prop_ccw * thrust_cmds
         torque = np.sum(torques, axis=0)
@@ -143,9 +144,11 @@ class QuadrotorDynamics(object):
         omega_mat_deriv = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]])
 
         dRdt = np.matmul(omega_mat_deriv, self.rot)
-        # update and orthogonalize
-        u, s, v = np.linalg.svd(self.rot + dt * dRdt)
-        self.rot = np.matmul(u, v)
+        self.rot += dt * dRdt
+        self.since_last_svd += 1
+        if self.since_last_svd > 60:
+            u, s, v = np.linalg.svd(self.rot + dt * dRdt)
+            self.rot = np.matmul(u, v)
 
         # translational dynamics
         acc = [0, 0, -GRAV] + (1.0 / self.mass) * np.matmul(self.rot, thrust)
@@ -481,7 +484,7 @@ def _random_obstacles(np_random, N, arena, our_radius):
     arena = float(arena)
     # all primitives should be tightly bound by unit circle in xy plane
     boxside = np.sqrt(2)
-    box = r3d.box(boxside, boxside, boxside)
+    box = r3d.tesselated_box(boxside, boxside, boxside, maxtris=200)
     sphere = r3d.sphere(radius=1.0, facets=16)
     cylinder = r3d.cylinder(radius=1.0, height=2.0, sections=32)
     # TODO cone-sphere collision
@@ -592,7 +595,7 @@ class Quadrotor3DScene(object):
 
         if obstacles:
             self.map = _random_obstacles(np_random, 30, self.world_box, quad_arm)
-            self.bodies += self.map.bodies
+            bodies += self.map.bodies
 
         world = r3d.World(bodies)
         batch = r3d.Batch()
@@ -808,18 +811,21 @@ class QuadrotorVisionEnv(gym.Env):
         #plt.show()
 
         grey = (2.0 / 255.0) * np.mean(rgb, axis=2) - 1.0
-        self.img_buf = np.roll(self.img_buf, -1, axis=2)
+        #self.img_buf = np.roll(self.img_buf, -1, axis=2)
+        self.img_buf[:,:,:-1] = self.img_buf[:,:,1:]
         self.img_buf[:,:,-1] = grey
 
         imu = np.concatenate([self.dynamics.omega, self.dynamics.accelerometer])
-        self.imu_buf = np.roll(self.imu_buf, -1, axis=1)
+        #self.imu_buf = np.roll(self.imu_buf, -1, axis=1)
+        self.imu_buf[:,:-1] = self.imu_buf[:,1:]
         self.imu_buf[:,-1] = imu
 
         # heading measurement - simplified, #95489c has a more nuanced version
         our_gps = self.dynamics.pos[:2]
         goal_gps = self.goal[:2]
         dir = clamp_norm(goal_gps - our_gps, 4.0)
-        self.dir_buf = np.roll(self.dir_buf, -1, axis=1)
+        #self.dir_buf = np.roll(self.dir_buf, -1, axis=1)
+        self.dir_buf[:,:-1] = self.dir_buf[:,1:]
         self.dir_buf[:,-1] = dir
 
         return (self.img_buf, self.imu_buf, self.dir_buf), reward, done, {}
@@ -833,7 +839,7 @@ class QuadrotorVisionEnv(gym.Env):
         pos = self.scene.map.sample_start(self.np_random)
         vel = omega = npa(0, 0, 0)
         # for debugging collisions w/ no policy:
-        #vel = self.np_random.uniform(-20, 20, size=3)
+        vel = self.np_random.uniform(-20, 20, size=3)
         vel[2] = 0
         #rotz = np.random.uniform(-np.pi, np.pi)
         #rotation = r3d.rotz(rotz)
