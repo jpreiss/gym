@@ -132,8 +132,8 @@ class QuadrotorDynamics(object):
 
         # TODO add noise
 
-        vel_damp = 0.99
-        omega_damp = 0.99
+        vel_damp = 0.999
+        omega_damp = 0.999
 
         # rotational dynamics
         omega_dot = ((1.0 / self.inertia) *
@@ -696,7 +696,7 @@ class QuadrotorEnv(gym.Env):
         self.observation_space = spaces.Box(-obs_high, obs_high)
 
         # TODO get this from a wrapper
-        self.ep_len = 256
+        self.ep_len = 64
         self.tick = 0
         self.dt = 1.0 / 50.0
         self.crashed = False
@@ -705,7 +705,7 @@ class QuadrotorEnv(gym.Env):
 
         # size of the box from which initial position will be randomly sampled
         # grows a little with each episode
-        self.box = 1.0
+        self.box = 0.5
 
     def _seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -731,9 +731,14 @@ class QuadrotorEnv(gym.Env):
 
         self.goal = npa(0, 0, 2)
         x, y = self.np_random.uniform(-self.box, self.box, size=(2,))
-        if self.box < 6:
-            self.box *= 1.0003 # x20 after 10000 resets
-        z = self.np_random.uniform(1, 3)
+        if self.box < 10:
+            # from 0.5 to 10 after 100k episodes
+            nextbox = self.box * 1.00003
+            if int(4*nextbox) > int(4*self.box):
+                print("box:", nextbox)
+            self.box = nextbox
+        #z = self.np_random.uniform(1, 3)
+        z = self.goal[2]
         pos = npa(x, y, z)
         #pos = npa(0,0,2)
         vel = omega = npa(0, 0, 0)
@@ -750,6 +755,8 @@ class QuadrotorEnv(gym.Env):
 
         self.crashed = False
         self.tick = 0
+        if self.ep_len < 1000:
+            self.ep_len += 0.01 # len 1000 after 100k episodes
         return self.dynamics.state_vector()
 
     def _render(self, mode='human', close=False):
