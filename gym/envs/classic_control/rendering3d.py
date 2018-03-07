@@ -172,7 +172,7 @@ class Scene(object):
     def initialize(self):
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
-        amb, diff, spec = (1.0 / len(self.lights)) * np.array([0.4, 1.2, 0.9])
+        amb, diff, spec = (1.0 / len(self.lights)) * np.array([0.4, 1.2, 0.5])
         for i, light in enumerate(self.lights):
             # TODO fix lights in world space instead of camera space
             glLightfv(GL_LIGHT0 + i, GL_POSITION, (GLfloat * 4)(*light))
@@ -192,6 +192,7 @@ def draw(scene, camera, target):
     glCullFace(GL_BACK)
     glEnable(GL_CULL_FACE);
     glEnable(GL_DEPTH_TEST)
+    glEnable(GL_RESCALE_NORMAL)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
     camera._matrix(target.shape)
@@ -407,27 +408,25 @@ class _PygColor(pyglet.graphics.Group):
             self.set_rgba(*color)
 
     def set_rgb(self, r, g, b):
-        self.color = (r, g, b, 1)
-        self.ccolor = (GLfloat * 4)(*self.color)
+        self.set_rgba(r, g, b, 1.0)
 
     def set_rgba(self, r, g, b, a):
-        self.color = (r, g, b, a)
-        self.ccolor = (GLfloat * 4)(*self.color)
-
-    def alpha(self):
-        return self.color[-1]
+        self.dcolor = (GLfloat * 4)(r, g, b, a)
+        spec_whiteness = 0.8
+        r, g, b = (1.0 - spec_whiteness) * np.array([r, g, b]) + spec_whiteness
+        self.scolor = (GLfloat * 4)(r, g, b, a)
 
     def set_state(self):
-        if self.alpha() < 1:
+        if self.dcolor[-1] < 1.0:
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, self.ccolor)
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(1, 1, 1, 1))
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, self.dcolor)
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, self.scolor)
         glMaterialfv(GL_FRONT_AND_BACK, GL_SHININESS, (GLfloat)(8.0))
 
     def unset_state(self):
-        if self.alpha() < 1:
+        if self.dcolor[-1] < 1.0:
             glDisable(GL_BLEND)
 
 class _PygTexture(pyglet.graphics.Group):
