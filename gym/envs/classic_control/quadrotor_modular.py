@@ -444,7 +444,7 @@ def _place_obstacles(np_random, N, box, radius_range, our_radius, tries=5):
     t = np.linspace(0, box, TILES+1)[:-1]
     scale = box / float(TILES)
     x, y = np.meshgrid(t, t)
-    pts = np.zeros((N, 3))
+    pts = np.zeros((N, 2))
     dist = x + np.inf
 
     radii = np_random.uniform(*radius_range, size=N)
@@ -468,8 +468,7 @@ def _place_obstacles(np_random, N, box, radius_range, our_radius, tries=5):
         for ind1d in np.where(d.flat <= 2*our_radius + scale)[0]:
             test_list[ind1d].append(i)
         dist = np.minimum(dist, d)
-        pts[i,:2] = pt - box/2.0
-        pts[i,2] = rad
+        pts[i,:] = pt - box/2.0
 
     # very coarse to allow for binning bugs
     test_list = np.array(test_list).reshape((TILES, TILES))
@@ -484,7 +483,7 @@ def _random_obstacles(np_random, N, arena, our_radius):
     arena = float(arena)
     # all primitives should be tightly bound by unit circle in xy plane
     boxside = np.sqrt(2)
-    box = r3d.box(boxside, boxside, boxside, maxtris=200)
+    box = r3d.box(boxside, boxside, boxside)
     sphere = r3d.sphere(radius=1.0, facets=16)
     cylinder = r3d.cylinder(radius=1.0, height=2.0, sections=32)
     # TODO cone-sphere collision
@@ -492,7 +491,7 @@ def _random_obstacles(np_random, N, arena, our_radius):
     primitives = [box, sphere, cylinder]
 
     bodies = []
-    max_radius = 3.0
+    max_radius = 2.0
     positions, radii, test_list = _place_obstacles(
         np_random, N, arena, (0.5, max_radius), our_radius)
     for i in range(N):
@@ -501,10 +500,15 @@ def _random_obstacles(np_random, N, arena, our_radius):
         tex_dark = 0.5 * np_random.uniform()
         tex_light = 0.5 * np_random.uniform() + 0.5
         color = 0.5 * np_random.uniform(size=3)
-        translation = positions[i,:]
-        if primitive is cylinder:
-            translation[2] = 0
+        heightscl = np.random.uniform(0.5, 2.0)
+        height = heightscl * 2.0 * radii[i]
+        z = (0 if primitive is cylinder else
+            (height/2.0 if primitive is sphere else
+            (height*boxside/4.0 if primitive is box
+            else np.nan)))
+        translation = np.append(positions[i,:], z)
         matrix = np.matmul(r3d.translate(translation), r3d.scale(radii[i]))
+        matrix = np.matmul(matrix, np.diag([1, 1, heightscl, 1]))
         body = r3d.Transform(matrix,
             #r3d.ProceduralTexture(tex_type, (tex_dark, tex_light), primitive))
                 r3d.Color(color, primitive))
@@ -594,7 +598,8 @@ class Quadrotor3DScene(object):
             self.goal_transform, self.quad_transform]
 
         if obstacles:
-            self.map = _random_obstacles(np_random, 30, self.world_box, quad_arm)
+            N = 20
+            self.map = _random_obstacles(np_random, N, self.world_box, quad_arm)
             bodies += self.map.bodies
 
         world = r3d.World(bodies)

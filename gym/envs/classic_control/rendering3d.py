@@ -172,6 +172,12 @@ class Scene(object):
     def initialize(self):
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
+
+        #glFogi(GL_FOG_MODE, GL_LINEAR)
+        #glFogf(GL_FOG_START, 20.0) # Fog Start Depth
+        #glFogf(GL_FOG_END, 100.0) # Fog End Depth
+        #glEnable(GL_FOG)
+
         amb, diff, spec = (1.0 / len(self.lights)) * np.array([0.4, 1.2, 0.5])
         for i, light in enumerate(self.lights):
             # TODO fix lights in world space instead of camera space
@@ -192,7 +198,7 @@ def draw(scene, camera, target):
     glCullFace(GL_BACK)
     glEnable(GL_CULL_FACE);
     glEnable(GL_DEPTH_TEST)
-    glEnable(GL_RESCALE_NORMAL)
+    glEnable(GL_NORMALIZE)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
     camera._matrix(target.shape)
