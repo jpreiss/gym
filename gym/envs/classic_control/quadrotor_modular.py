@@ -484,7 +484,7 @@ def _random_obstacles(np_random, N, arena, our_radius):
     arena = float(arena)
     # all primitives should be tightly bound by unit circle in xy plane
     boxside = np.sqrt(2)
-    box = r3d.tesselated_box(boxside, boxside, boxside, maxtris=200)
+    box = r3d.box(boxside, boxside, boxside, maxtris=200)
     sphere = r3d.sphere(radius=1.0, facets=16)
     cylinder = r3d.cylinder(radius=1.0, height=2.0, sections=32)
     # TODO cone-sphere collision
