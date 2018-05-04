@@ -64,6 +64,7 @@ class PointMassBatchEnv(gym.Env):
 
     def _step(self, action):
         assert action.shape == (self.N,2)
+        ac_penalty = 0.0 * np.sum(action ** 2, axis=1)
         action[action > 1] = 1
         action[action < -1] = -1
 
@@ -79,7 +80,7 @@ class PointMassBatchEnv(gym.Env):
         self.state = np.hstack([x, dx, self.gain[:,None]])
 
         goaldist = np.linalg.norm(x, axis=1)
-        reward = -goaldist
+        reward = -goaldist - ac_penalty
         # compensate for gain. derived from integrating optimal bang-bang policy
         # reward = -goaldist * np.sqrt(np.abs(self.gain))
 
@@ -97,7 +98,7 @@ class PointMassBatchEnv(gym.Env):
         return self.state, reward, self.done, {}
 
     def sample_sysid(self):
-        abs_gain = self.np_random.uniform(0.1 * self.maxgain, self.maxgain, size=(self.N))
+        abs_gain = self.np_random.uniform(0.05 * self.maxgain, self.maxgain, size=(self.N))
         sgn_gain = (-1) ** self.np_random.randint(1, 3, size=(self.N))
         self.gain = sgn_gain * abs_gain
         self.state[:,-1] = self.gain
