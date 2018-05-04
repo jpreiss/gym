@@ -51,7 +51,7 @@ def rand_uniform_rot3d(np_random):
         fwd = randunit()
     left = normalize(cross(up, fwd))
     up = cross(fwd, left)
-    rot = np.hstack([fwd, left, up])
+    rot = np.column_stack([fwd, left, up])
     return rot
 
 def npa(*args):
@@ -66,6 +66,13 @@ def hinge_loss(x, loss_above):
 def clamp_norm(x, maxnorm):
     n = np.linalg.norm(x)
     return x if n <= maxnorm else (maxnorm / n) * x
+
+# project a vector into the x-y plane and normalize it.
+def to_xyhat(vec):
+    v = deepcopy(vec)
+    v[2] = 0
+    v, _ = normalize(v)
+    return v
 
 
 class QuadrotorDynamics(object):
@@ -140,7 +147,8 @@ class QuadrotorDynamics(object):
             (cross(-self.omega, self.inertia * self.omega) + torque))
         self.omega = omega_damp * self.omega + dt * omega_dot
 
-        x, y, z = self.omega
+        omega_vec = np.matmul(self.rot, self.omega)
+        x, y, z = omega_vec
         omega_mat_deriv = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]])
 
         dRdt = np.matmul(omega_mat_deriv, self.rot)
@@ -149,6 +157,7 @@ class QuadrotorDynamics(object):
         if self.since_last_svd > 60:
             u, s, v = np.linalg.svd(self.rot + dt * dRdt)
             self.rot = np.matmul(u, v)
+            self.since_last_svd = 0
 
         # translational dynamics
         acc = [0, 0, -GRAV] + (1.0 / self.mass) * np.matmul(self.rot, thrust)
@@ -315,17 +324,26 @@ class NonlinearPositionController(object):
         self.Jinv = np.linalg.inv(jacobian)
 
     def step(self, dynamics, goal, dt):
-        kp_p, kd_p = 5.0, 4.0
-        kp_a, kd_a = 100.0, 50.0
+        kp_p, kd_p = 4.5, 3.5
+        kp_a, kd_a = 200.0, 50.0
 
-        e_p = clamp_norm(dynamics.pos - goal, 4.0)
+        to_goal = goal - dynamics.pos
+        goal_dist = norm(to_goal)
+        e_p = -clamp_norm(to_goal, 4.0)
         e_v = dynamics.vel
         acc_des = -kp_p * e_p - kd_p * e_v + npa(0, 0, GRAV)
+
+        if goal_dist > 2.0 * dynamics.arm:
+            # point towards goal
+            xc_des = to_xyhat(to_goal)
+        else:
+            # keep current
+            xc_des = to_xyhat(dynamics.rot[:,0])
 
         # rotation towards the ideal thrust direction
         # see Mellinger and Kumar 2011
         zb_des, _ = normalize(acc_des)
-        yb_des, _ = normalize(cross(zb_des, [1, 0, 0]))
+        yb_des, _ = normalize(cross(zb_des, xc_des))
         xb_des    = cross(yb_des, zb_des)
         R_des = np.column_stack((xb_des, yb_des, zb_des))
         R = dynamics.rot
@@ -333,11 +351,12 @@ class NonlinearPositionController(object):
         def vee(R):
             return npa(R[2,1], R[0,2], R[1,0])
         e_R = 0.5 * vee(np.matmul(R_des.T, R) - np.matmul(R.T, R_des))
+        e_R[2] *= 0.2 # slow down yaw dynamics
         e_w = dynamics.omega
 
         dw_des = -kp_a * e_R - kd_a * e_w
         # we want this acceleration, but we can only accelerate in one direction!
-        thrust_mag = np.dot(acc_des, dynamics.rot[:,2])
+        thrust_mag = np.dot(acc_des, R[:,2])
 
         des = np.append(thrust_mag, dw_des)
         thrusts = np.matmul(self.Jinv, des)
@@ -718,8 +737,8 @@ class QuadrotorEnv(gym.Env):
 
     def _step(self, action):
         if not self.crashed:
-            self.controller.step(self.dynamics, action, self.dt)
-            #self.oracle.step(self.dynamics, self.goal, self.dt)
+            #self.controller.step(self.dynamics, action, self.dt)
+            self.oracle.step(self.dynamics, self.goal, self.dt)
             self.crashed = self.scene.update_state(self.dynamics)
             reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
         else:
@@ -749,10 +768,16 @@ class QuadrotorEnv(gym.Env):
         vel = omega = npa(0, 0, 0)
         #vel = self.np_random.uniform(-2, 2, size=3)
         #vel[2] *= 0.1
-        #rotz = np.random.uniform(-np.pi, np.pi)
-        #rotation = r3d.rotz(rotz)
-        #rotation = rotation[:3,:3]
-        rotation = np.eye(3)
+
+        def randrot():
+            rotz = np.random.uniform(-np.pi, np.pi)
+            return r3d.rotz(rotz)[:3,:3]
+
+        # make sure we're sort of pointing towards goal
+        rotation = randrot()
+        while np.dot(rotation[:,0], to_xyhat(-pos)) < 0.5:
+            rotation = randrot()
+
         self.dynamics.set_state(pos, vel, rotation, omega)
 
         self.scene.reset(self.goal, self.dynamics)
@@ -782,6 +807,7 @@ class QuadrotorVisionEnv(gym.Env):
         self.action_space = self.controller.action_space(self.dynamics)
         self.scene = None
         self.crashed = False
+        self.oracle = NonlinearPositionController(self.dynamics)
 
         seq_len = 4
         img_w, img_h = 64, 64
@@ -808,7 +834,9 @@ class QuadrotorVisionEnv(gym.Env):
 
     def _step(self, action):
         if not self.crashed:
-            self.controller.step(self.dynamics, action, self.dt)
+            #self.controller.step(self.dynamics, action, self.dt)
+            print("oracle step")
+            self.oracle.step(self.dynamics, self.goal, self.dt)
             self.crashed = self.scene.update_state(self.dynamics)
             reward = goal_seeking_reward(self.dynamics, self.goal, action, self.dt)
         else:
@@ -851,12 +879,14 @@ class QuadrotorVisionEnv(gym.Env):
         pos = self.scene.map.sample_start(self.np_random)
         vel = omega = npa(0, 0, 0)
         # for debugging collisions w/ no policy:
-        vel = self.np_random.uniform(-20, 20, size=3)
-        vel[2] = 0
-        #rotz = np.random.uniform(-np.pi, np.pi)
-        #rotation = r3d.rotz(rotz)
-        #rotation = rotation[:3,:3]
-        rotation = np.eye(3)
+        #vel = self.np_random.uniform(-20, 20, size=3)
+        #vel[2] = 0
+
+        # make us point towards the goal
+        xb = to_xyhat(self.goal - pos)
+        zb = npa(0, 0, 1)
+        yb = cross(zb, xb)
+        rotation = np.column_stack([xb, yb, zb])
         self.dynamics.set_state(pos, vel, rotation, omega)
         self.crashed = False
 
