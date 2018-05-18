@@ -105,6 +105,11 @@ register(
     entry_point='gym.envs.classic_control:QuadrotorBatchEnv',
 )
 
+register(
+    id='PointMass-Batch-Redundant-v0',
+    entry_point='gym.envs.classic_control:PointMassRedundantBatchEnv',
+)
+
 # Classic - SysID
 # ----------------------------------------
 
@@ -293,8 +298,15 @@ register(
 register(
     id='HalfCheetah-v1',
     entry_point='gym.envs.mujoco:HalfCheetahEnv',
-    max_episode_steps=1000,
+    max_episode_steps=200,
     reward_threshold=4800.0,
+)
+
+register(
+    id='HalfCheetah-Batch-v1',
+    entry_point='gym.envs.mujoco:HalfCheetahBatchEnv',
+    #max_episode_steps=1000,
+    #reward_threshold=4800.0,
 )
 
 register(
