@@ -1,5 +1,5 @@
 """
-3D quadrotor environment.
+Quadrotor simulation for OpenAI Gym, with components reusable elsewhere.
 """
 
 import logging
@@ -25,8 +25,7 @@ TILES = 256 # number of tiles used for the obstacle map
 # overall TODO:
 # - fix front face CCW to enable culling
 # - add texture coords to primitives
-# - add more controllers
-# - oracle policy (access to map, true state, etc.)
+# - oracle policy for obstacles (already have for free space)
 # - non-flat floor
 # - fog
 
@@ -34,6 +33,7 @@ TILES = 256 # number of tiles used for the obstacle map
 def cross(a, b):
     return np.array([a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]])
 
+# returns (normalized vector, original norm)
 def normalize(x):
     n = norm(x)
     if n < 0.00001:
@@ -43,6 +43,7 @@ def normalize(x):
 def norm2(x):
     return np.sum(x ** 2)
 
+# uniformly sample from the set of all 3D rotation matrices
 def rand_uniform_rot3d(np_random):
     randunit = lambda: normalize(np_random.normal(size=(3,)))[0]
     up = randunit()
@@ -54,14 +55,9 @@ def rand_uniform_rot3d(np_random):
     rot = np.column_stack([fwd, left, up])
     return rot
 
+# shorter way to construct a numpy array
 def npa(*args):
     return np.array(args)
-
-def hinge_loss(x, loss_above):
-    try:
-        return np.max(0, x - loss_above)
-    except TypeError:
-        return max(0, x - loss_above)
 
 def clamp_norm(x, maxnorm):
     n = np.linalg.norm(x)
@@ -75,20 +71,20 @@ def to_xyhat(vec):
     return v
 
 
+# simple simulation of quadrotor dynamics.
 class QuadrotorDynamics(object):
+    # mass unit: kilogram
+    # arm_length unit: meter
+    # inertia unit: kg * m^2, 3-element vector representing diagonal matrix
     # thrust_to_weight is the total, it will be divided among the 4 props
     # torque_to_thrust is ratio of torque produced by prop to thrust
     def __init__(self, mass, arm_length, inertia, thrust_to_weight=2.0, torque_to_thrust=0.05):
         assert np.isscalar(mass)
         assert np.isscalar(arm_length)
         assert inertia.shape == (3,)
-        # unit: kilogram
         self.mass = mass
-        # unit: meter
         self.arm = arm_length
-        # unit: kg * m^2
         self.inertia = inertia
-        # unit: ratio
         self.thrust_to_weight = thrust_to_weight
         self.thrust = GRAV * mass * thrust_to_weight / 4.0
         self.torque = torque_to_thrust * self.thrust
@@ -103,9 +99,9 @@ class QuadrotorDynamics(object):
         self.prop_ccw = np.array([1, -1, 1, -1])
         self.since_last_svd = 0
 
-    # pos, vel, in world coords
-    # rotation is (body coords) -> (world coords)
-    # omega in body coords
+    # pos, vel, in world coords (meters)
+    # rotation is 3x3 matrix (body coords) -> (world coords)
+    # omega is angular velocity (radians/sec) in body coords, i.e. the gyroscope
     def set_state(self, position, velocity, rotation, omega, thrusts=np.zeros((4,))):
         for v in (position, velocity, omega):
             assert v.shape == (3,)
@@ -127,10 +123,14 @@ class QuadrotorDynamics(object):
         rot = rand_uniform_rot3d(np_random)
         self.set_state(pos, vel, rot, omega)
 
+    # thrust_cmds is motor thrusts given in normalized range [0, 1].
+    # 1 represents the max possible thrust of the motor.
     def step(self, thrust_cmds, dt):
         # uncomment for debugging. they are slow
         #assert np.all(thrust_cmds >= 0)
         #assert np.all(thrust_cmds <= 1)
+
+        # convert the motor commands to a force and moment on the body
         thrusts = self.thrust * thrust_cmds
         torques = self.prop_crossproducts * thrusts[:,None]
         torques[:,2] += self.torque * self.prop_ccw * thrust_cmds
@@ -153,9 +153,11 @@ class QuadrotorDynamics(object):
 
         dRdt = np.matmul(omega_mat_deriv, self.rot)
         self.rot += dt * dRdt
+
+        # occasionally orthogonalize the rotation matrix
         self.since_last_svd += 1
         if self.since_last_svd > 60:
-            u, s, v = np.linalg.svd(self.rot + dt * dRdt)
+            u, s, v = np.linalg.svd(self.rot)
             self.rot = np.matmul(u, v)
             self.since_last_svd = 0
 
@@ -194,7 +196,9 @@ def default_dynamics():
     return QuadrotorDynamics(mass, arm_length, inertia,
         thrust_to_weight=thrust_to_weight)
 
+
 # different control schemes.
+
 
 # like raw motor control, but shifted such that a zero action
 # corresponds to the amount of thrust needed to hover.
@@ -208,12 +212,13 @@ class ShiftedMotorControl(object):
         high = (dynamics.thrust_to_weight - 1.0) * np.ones(4)
         return spaces.Box(low, high)
 
-    # dynamics passed by reference
+    # modifies the dynamics in place.
     def step(self, dynamics, action, dt):
         action = (action + 1.0) / dynamics.thrust_to_weight
         action[action < 0] = 0
         action[action > 1] = 1
         dynamics.step(action, dt)
+
 
 # jacobian of (acceleration magnitude, angular acceleration)
 #       w.r.t (normalized motor thrusts) in range [0, 1]
@@ -226,6 +231,7 @@ def quadrotor_jacobian(dynamics):
     J = np.vstack([dv, dw])
     assert np.linalg.cond(J) < 25.0
     return J
+
 
 # P-only linear controller on angular velocity.
 # direct (ignoring motor lag) control of thrust magnitude.
@@ -244,6 +250,7 @@ class OmegaThrustControl(object):
         high = npa(max_g,  max_rp,  max_rp,  max_yaw)
         return spaces.Box(low, high)
 
+    # modifies the dynamics in place.
     def step(self, dynamics, action, dt):
         kp = 5.0 # could be more aggressive
         omega_err = dynamics.omega - action[1:]
@@ -256,6 +263,7 @@ class OmegaThrustControl(object):
         dynamics.step(thrusts, dt)
 
 
+# TODO: this has not been tested well yet.
 class VelocityYawControl(object):
     def __init__(self, dynamics):
         jacobian = quadrotor_jacobian(dynamics)
@@ -301,28 +309,14 @@ class VelocityYawControl(object):
         dynamics.step(thrusts, dt)
 
 
-class NonlinearPositionController2(object):
-    def __init__(self, dynamics):
-        self.vel = VelocityYawControl(dynamics)
-
-    def step(self, dynamics, goal, dt):
-        kv = 1.2
-        v_des = -kv * clamp_norm(dynamics.pos - goal, 4.0)
-
-        x, y, _ = dynamics.rot[:,0]
-        theta = np.arctan2(y, x)
-        ky = 0.0
-        vy_des = -ky * theta
-
-        action = np.append(v_des, vy_des)
-        self.vel.step(dynamics, action, dt)
-
-
+# this is an "oracle" policy to drive the quadrotor towards a goal
+# using the controller from Mellinger et al. 2011
 class NonlinearPositionController(object):
     def __init__(self, dynamics):
         jacobian = quadrotor_jacobian(dynamics)
         self.Jinv = np.linalg.inv(jacobian)
 
+    # modifies the dynamics in place.
     def step(self, dynamics, goal, dt):
         kp_p, kd_p = 4.5, 3.5
         kp_a, kd_a = 200.0, 50.0
@@ -366,42 +360,11 @@ class NonlinearPositionController(object):
 
 
 # TODO:
-# class AttitudeControl
-# class VelocityControl
+# class AttitudeControl,
+# refactor common parts of VelocityYaw and NonlinearPosition
 
-def bulky_goal_seeking_reward(dynamics, goal, action, dt):
-    vel = dynamics.vel
-    to_goal = -dynamics.pos
 
-    # note we don't want to penalize distance^2 because in harder instances
-    # the initial distance can be very far away
-    loss_pos = norm(to_goal)
-
-    # penalize velocity away from goal but not towards
-    # TODO this is too hacky, try to not use it
-    loss_vel_away = 0.1 * (norm(vel) * norm(to_goal) - np.dot(vel, to_goal))
-
-    # penalize altitude above this threshold
-    max_alt = 3.0
-    loss_alt = 2 * hinge_loss(dynamics.pos[2], 3) ** 2
-
-    # penalize yaw spin more
-    loss_spin = 0.02 * norm2([1, 1, 10] * dynamics.omega)
-
-    loss_effort = 0.02 * norm2(action)
-
-    # TODO this is too hacky, try not to use it
-    goal_thresh = 1.0 # within this distance, start rewarding
-    goal_max = 0 # max reward when exactly at goal
-    a = -goal_max / (goal_thresh**2)
-    reward_goal = max(0,  a * norm2(to_goal) + goal_max)
-
-    reward = -dt * np.sum([
-        -reward_goal,
-        loss_pos, loss_vel_away, loss_alt, loss_spin, loss_effort])
-
-    return reward
-
+# reasonable reward function for hovering at a goal and not flying too high
 def goal_seeking_reward(dynamics, goal, action, dt):
     # log to create a sharp peak at the goal
     dist = np.linalg.norm(goal - dynamics.pos)
@@ -412,12 +375,15 @@ def goal_seeking_reward(dynamics, goal, action, dt):
     loss_alt = np.exp(2*(dynamics.pos[2] - max_alt))
 
     # penalize amount of control effort
-    loss_effort = 0.0 * np.linalg.norm(action)
+    loss_effort = 0.01 * np.linalg.norm(action)
 
     reward = -dt * np.sum([loss_pos, loss_alt, loss_effort])
     return reward
 
 
+# for visualization.
+# a rough attempt at a reasonable third-person camera
+# that looks "over the quadrotor's shoulder" from behind
 class ChaseCamera(object):
     def __init__(self):
         self.view_dist = 4
@@ -495,6 +461,7 @@ def _place_obstacles(np_random, N, box, radius_range, our_radius, tries=5):
     #print(amt_free * 100, "pct free space")
     return pts, radii, test_list
 
+
 # generate N obstacles w/ randomized primitive, size, color, TODO texture
 # arena: boundaries of world in xy plane
 # our_radius: quadrotor's radius
@@ -536,6 +503,7 @@ def _random_obstacles(np_random, N, arena, our_radius):
     return ObstacleMap(arena, bodies, test_list)
 
 
+# main class for non-visual aspects of the obstacle map.
 class ObstacleMap(object):
     def __init__(self, box, bodies, test_lists):
         self.box = box
@@ -587,6 +555,8 @@ class ObstacleMap(object):
         return np.int32(scale * (np.array([x,y]) + self.box / 2.0))
 
 
+# using our rendering3d.py to draw the scene in 3D.
+# this class deals both with map and mapless cases.
 class Quadrotor3DScene(object):
     def __init__(self, np_random, quad_arm, w, h,
         obstacles=True, visible=True, resizable=True):
@@ -694,6 +664,8 @@ class Quadrotor3DScene(object):
         return self.obs_target.read()
 
 
+# Gym environment for quadrotor seeking the origin
+# with no obstacles and full state observations
 class QuadrotorEnv(gym.Env):
     metadata = {
         'render.modes': ['human', 'rgb_array'],
@@ -793,6 +765,8 @@ class QuadrotorEnv(gym.Env):
         self.scene.render_chase()
 
 
+# Gym environment for quadrotor seeking a given goal
+# with obstacles and vision + IMU observations
 class QuadrotorVisionEnv(gym.Env):
     metadata = {
         'render.modes': ['human', 'rgb_array'],
