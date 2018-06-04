@@ -9,17 +9,19 @@ import itertools as it
 
 class MujocoBatchEnv(gym.Env):
 
+    def __init__(self, *args):
+        self.init_args = args
+
     # rand_gen should be an infinite generator function
     # that takes an np_random object
     # and yields (scalar Mujoco env, sysid vector) pairs
 
-    def __init__(self, n_parallel, n_total, rand_gen, ep_len):
+    def _init_after_seed(self, n_parallel, n_total, rand_gen, ep_len):
         self.N = n_parallel
         self.N_RAND = n_total
 
         self.tick = 0
         self.ep_len = ep_len
-        self._seed()
 
         # construct a bunch of randomized models
         envs_all, sysids_all = zip(
@@ -50,6 +52,7 @@ class MujocoBatchEnv(gym.Env):
 
     def _seed(self, seed=None):
         self.np_random, seed = gym.utils.seeding.np_random(seed)
+        self._init_after_seed(*self.init_args)
         return [seed]
 
     def sample_sysid(self):
