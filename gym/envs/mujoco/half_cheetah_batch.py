@@ -31,7 +31,7 @@ def named_child(node, tag, name):
 
 # apply the given function to the attribute
 # (handles lists with scalar fn and scalar or list params)
-def fn_attr(np_random, node, attrib, fn, params):
+def fn_attr(node, attrib, fn, params):
     vals = parsevec(node.attrib[attrib])
     if isinstance(params, list):
         assert len(vals) == len(params)
@@ -61,7 +61,7 @@ def randomize_chain(np_random, body):
 
         assert geom.attrib["type"] == "capsule", "TODO: support other geom types"
         # TODO I think this just rotates the capsule itself - in that case, not needed
-        #fn_attr(npr, geom, "axisangle", rand_add, [0, 0, 0, angleplusminus])
+        #fn_attr(geom, "axisangle", rand_add, [0, 0, 0, angleplusminus])
         cpos = parsevec(child.attrib["pos"])
         body_len = np.linalg.norm(cpos)
 
@@ -86,11 +86,11 @@ def randomize_chain(np_random, body):
     def rand_length_end(geom):
         assert geom.attrib["type"] == "capsule", "TODO: support other geom types"
         # TODO I think this just rotates the capsule itself - in that case, not needed
-        #fn_attr(npr, geom, "axisangle", rand_add, [0, 0, 0, angleplusminus])
+        #fn_attr(geom, "axisangle", rand_add, [0, 0, 0, angleplusminus])
         scale = rand_ratio(npr, JOINT_LEN_RATIO)
-        fn_attr(npr, geom, "pos", op.mul, scale)
+        fn_attr(geom, "pos", op.mul, scale)
         geom_size = parsevec(geom.attrib["size"])
-        fn_attr(npr, geom, "size", op.mul, [1, scale])
+        fn_attr(geom, "size", op.mul, [1, scale])
         return [geom_size[1] * scale]
 
     sysid_params = []
@@ -101,9 +101,9 @@ def randomize_chain(np_random, body):
     damping_mul = rand_ratio(npr, JOINT_DAMPING_RATIO)
     stiffness_mul = rand_ratio(npr, JOINT_STIFFNESS_RATIO)
     range_add = list(npr.uniform(-JOINT_RANGE_ADD, JOINT_RANGE_ADD, size=(2)))
-    damping = fn_attr(npr, joints[0], "damping", op.mul, damping_mul)
-    stiffness = fn_attr(npr, joints[0], "stiffness", op.mul, stiffness_mul)
-    range = fn_attr(npr, joints[0], "range", op.add, range_add)
+    damping = fn_attr(joints[0], "damping", op.mul, damping_mul)
+    stiffness = fn_attr(joints[0], "stiffness", op.mul, stiffness_mul)
+    range = fn_attr(joints[0], "range", op.add, range_add)
     sysid_params.extend(damping + stiffness + range)
 
     # randomize my child
@@ -134,21 +134,21 @@ def mutate_cheetah_tree(np_random, tree):
 
     lenscale = rand_ratio(npr, TORSO_LEN_RATIO)
     torso_geom = named_child(torso, "geom", "torso")
-    fn_attr(npr, torso_geom, "fromto", op.mul, lenscale) # depending on being zero-centered
+    fn_attr(torso_geom, "fromto", op.mul, lenscale) # depending on being zero-centered
     head_geom = named_child(torso, "geom", "head")
     head_shift = (lenscale / 2.0) - 0.5
-    fn_attr(npr, head_geom, "pos", op.add, [head_shift, 0, 0])
+    fn_attr(head_geom, "pos", op.add, [head_shift, 0, 0])
 
     sysid_params = [lenscale]
 
     for thigh_name in ("bthigh", "fthigh"):
         thigh = named_child(torso, "body", thigh_name)
-        fn_attr(npr, thigh, "pos", op.mul, lenscale)
+        fn_attr(thigh, "pos", op.mul, lenscale)
         sysid_params.extend(randomize_chain(np_random, thigh))
 
     ac = tree.find("actuator")
     for motor in ac.findall("motor"):
-        gear_ratio = fn_attr(npr, motor, "gear", op.mul, rand_ratio(np_random, GEAR_RATIO))
+        gear_ratio = fn_attr(motor, "gear", op.mul, rand_ratio(np_random, GEAR_RATIO))
         sysid_params.extend(gear_ratio)
 
     return np.array(sysid_params)
