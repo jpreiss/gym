@@ -8,13 +8,16 @@ class HalfCheetahEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         utils.EzPickle.__init__(self)
 
     def _step(self, action):
+        reward_ctrl = -0.1 * np.square(action).sum()
+        action[action < -1] = -1
+        action[action > 1] = 1
         xposbefore = self.model.data.qpos[0, 0]
         self.do_simulation(action, self.frame_skip)
         xposafter = self.model.data.qpos[0, 0]
         ob = self._get_obs()
-        reward_ctrl = - 0.1 * np.square(action).sum()
         reward_run = (xposafter - xposbefore)/self.dt
         reward = reward_ctrl + reward_run
+        #reward = min(reward, 1.0)
         done = False
         return ob, reward, done, {}
 

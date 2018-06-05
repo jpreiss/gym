@@ -19,6 +19,7 @@ class MujocoBatchEnv(gym.Env):
     def _init_after_seed(self, n_parallel, n_total, rand_gen, ep_len):
         self.N = n_parallel
         self.N_RAND = n_total
+        self.mean_rews = np.zeros(n_total)
 
         self.tick = 0
         self.ep_len = ep_len
@@ -30,7 +31,6 @@ class MujocoBatchEnv(gym.Env):
         self.sysid_dim = sysids_all[0].shape[0]
         self.envs_all = np.array(envs_all)
         self.sysids_all = np.row_stack(sysids_all)
-        print("sysid dimension:", self.sysids_all[0].shape)
 
         env0 = self.envs_all[0]
         self.obs_dim = env0.observation_space.low.shape
@@ -59,7 +59,8 @@ class MujocoBatchEnv(gym.Env):
         prev_env0 = None
         if self.envs is not None:
             prev_env0 = self.envs[0]
-        selection = self.np_random.choice(self.N_RAND, self.N)
+        selection = self.np_random.choice(self.N_RAND, self.N, replace=False)
+        self.selection = selection
         self.envs = self.envs_all[selection]
         self.sysid = self.sysids_all[selection,:]
         assert self.sysid.shape == (self.N, self.sysid_dim)
@@ -77,6 +78,13 @@ class MujocoBatchEnv(gym.Env):
             ob, reward, done, rew_dict = self.envs[i]._step(a[i,:])
             obs[i] = ob
             rewards[i] = reward
+
+        if False:
+            beta = 0.9995
+            self.mean_rews[self.selection] = (
+                beta * self.mean_rews[self.selection] +
+                (1.0 - beta) * rewards)
+            rewards -= self.mean_rews[self.selection]
 
         self.tick += 1
         done = self.tick >= self.ep_len
