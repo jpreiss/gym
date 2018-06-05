@@ -42,12 +42,14 @@ def fn_attr(node, attrib, fn, params):
     return newvals
 
 
-TORSO_LEN_RATIO = 1.5
-JOINT_LEN_RATIO = 1.5
-JOINT_RANGE_ADD = 0.2
-JOINT_STIFFNESS_RATIO = 1.5
-JOINT_DAMPING_RATIO = 1.5
-GEAR_RATIO = 1.5
+RANDOMNESS = 2.0
+
+TORSO_LEN_RATIO = RANDOMNESS
+JOINT_LEN_RATIO = RANDOMNESS
+JOINT_RANGE_ADD = 0.3 * (RANDOMNESS - 1.0)
+JOINT_STIFFNESS_RATIO = RANDOMNESS
+JOINT_DAMPING_RATIO = RANDOMNESS
+GEAR_RATIO = RANDOMNESS
 
 
 # input must be a kinematic chain (sequence of bodies separated by hinge joints)
@@ -175,6 +177,8 @@ def half_cheetah_gen(np_random):
 
         #print("constructing env", i)
         env = HalfCheetahEnv(model_path=write_path)
+        s = np_random.randint(100000)
+        env.seed(s)
         yield env, sysid_vec
         #return env, sysid_vec
         #print("yielded env", i)
