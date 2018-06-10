@@ -317,6 +317,16 @@ register(
 )
 
 register(
+    id='Ant-Batch-v1',
+    entry_point='gym.envs.mujoco:AntBatchEnv',
+)
+
+register(
+    id='Hopper-Batch-v1',
+    entry_point='gym.envs.mujoco:HopperBatchEnv',
+)
+
+register(
     id='Swimmer-v1',
     entry_point='gym.envs.mujoco:SwimmerEnv',
     max_episode_steps=1000,
