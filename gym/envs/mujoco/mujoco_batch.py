@@ -40,9 +40,18 @@ class MujocoBatchEnv(gym.Env):
         self.ep_len = ep_len
 
         # construct a bunch of randomized models
-        envs_all, sysids_all = zip(*list(it.islice(
-            _generate_envs(self.np_random, EnvClass, xml_path, mutator),
-            self.N_RAND)))
+        # little complicated to deal with N_RAND < N case
+        # (we can't just sample with replacement because mujoco envs have reference semantics)
+        def gen():
+            while True:
+                self.np_random.seed(self.seed)
+                yield from it.islice(
+                    _generate_envs(self.np_random, EnvClass, xml_path, mutator),
+                    self.N_RAND)
+
+        n_envs = max(self.N, self.N_RAND)
+        envs_all, sysids_all = zip(*list(it.islice(gen(), n_envs)))
+
         assert len(sysids_all[0].shape) == 1
         self.sysid_dim = sysids_all[0].shape[0]
         self.envs_all = np.array(envs_all)
@@ -50,7 +59,6 @@ class MujocoBatchEnv(gym.Env):
         s = self.sysids_all.flatten()
         print("sysid params: max {}, min {}, mean {}, std {}".format(
             np.amax(s), np.amin(s), np.mean(s), np.std(s)))
-
 
         env0 = self.envs_all[0]
         self.obs_dim = env0.observation_space.low.shape
@@ -72,6 +80,7 @@ class MujocoBatchEnv(gym.Env):
 
     def _seed(self, seed=None):
         self.np_random, seed = gym.utils.seeding.np_random(seed)
+        self.seed = seed
         self._init_after_seed(*self.init_args)
         return [seed]
 
@@ -79,7 +88,7 @@ class MujocoBatchEnv(gym.Env):
         prev_env0 = None
         if self.envs is not None:
             prev_env0 = self.envs[0]
-        selection = self.np_random.choice(self.N_RAND, self.N, replace=False)
+        selection = self.np_random.choice(len(self.envs_all), self.N, replace=False)
         self.selection = selection
         self.envs = self.envs_all[selection]
         self.sysid = self.sysids_all[selection,:]
@@ -202,53 +211,106 @@ def randomize_chain(np_random, body, randomness):
     JOINT_DAMPING_RATIO = randomness
 
     def rand_length_withchild(geom, child):
-
         assert geom.attrib["type"] == "capsule", "TODO: support other geom types"
-        # TODO I think this just rotates the capsule itself - in that case, not needed
-        #fn_attr(geom, "axisangle", rand_add, [0, 0, 0, angleplusminus])
-        cpos = parsevec(child.attrib["pos"])
-        body_len = np.linalg.norm(cpos)
 
-        geom_size = parsevec(geom.attrib["size"])
-        geom_len_delta = geom_size[1] - body_len
-        #assert geom_len_delta >= 0
-        geom_len_delta = 0
+        assert not ("axisangle" in geom.attrib and "fromto" in geom.attrib)
 
-        #print("child pos old", child.attrib["pos"])
+        if "axisangle" in geom.attrib:
+            cpos = parsevec(child.attrib["pos"])
+            body_len = np.linalg.norm(cpos)
 
-        ratio = rand_ratio(npr, JOINT_LEN_RATIO)
-        geom_size[1] = ratio * 0.5 * body_len + geom_len_delta 
+            geom_size = parsevec(geom.attrib["size"])
+            #geom_len_delta = geom_size[1] - body_len
+            geom_len_delta = 0
 
-        geom.attrib["pos"] = formatvec(0.5 * cpos * ratio)
-        geom.attrib["size"] = formatvec(geom_size)
-        child.attrib["pos"] = formatvec(ratio * cpos)
+            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            geom_size[1] = ratio * 0.5 * body_len + geom_len_delta 
 
-        #print("child pos new", child.attrib["pos"])
+            geom.attrib["pos"] = formatvec(0.5 * cpos * ratio)
+            geom.attrib["size"] = formatvec(geom_size)
+            child.attrib["pos"] = formatvec(ratio * cpos)
 
-        return [ratio * body_len]
+            return [ratio * body_len]
+
+        elif "fromto" in geom.attrib:
+            cpos = parsevec(child.attrib["pos"])
+            body_len = np.linalg.norm(cpos)
+
+            fromto = parsevec(geom.attrib["fromto"])
+            if not np.all(fromto[:3] == 0):
+                print("invalid fromto:", fromto)
+            assert np.all(fromto[:3] == 0)
+            assert np.all(fromto[3:] == cpos)
+
+            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+
+            geom.attrib["fromto"] = formatvec(ratio * fromto)
+            child.attrib["pos"] = formatvec(ratio * cpos)
+
+            return [ratio * body_len]
+        else:
+            raise NotImplementedError
+
 
     def rand_length_end(geom):
         assert geom.attrib["type"] == "capsule", "TODO: support other geom types"
-        # TODO I think this just rotates the capsule itself - in that case, not needed
-        #fn_attr(geom, "axisangle", rand_add, [0, 0, 0, angleplusminus])
-        scale = rand_ratio(npr, JOINT_LEN_RATIO)
-        fn_attr(geom, "pos", op.mul, scale)
-        geom_size = parsevec(geom.attrib["size"])
-        fn_attr(geom, "size", op.mul, [1, scale])
-        return [geom_size[1] * scale]
+
+        assert not ("axisangle" in geom.attrib and "fromto" in geom.attrib)
+
+        if "axisangle" in geom.attrib:
+
+            scale = rand_ratio(npr, JOINT_LEN_RATIO)
+            fn_attr(geom, "pos", op.mul, scale)
+            geom_size = parsevec(geom.attrib["size"])
+            fn_attr(geom, "size", op.mul, [1, scale])
+            return [geom_size[1] * scale]
+
+        elif "fromto" in geom.attrib:
+
+            fromto = parsevec(geom.attrib["fromto"])
+            if not np.all(fromto[:3] == 0):
+                print("invalid fromto:", fromto)
+            assert np.all(fromto[:3] == 0)
+
+            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            geom.attrib["fromto"] = formatvec(ratio * fromto)
+            body_len = np.linalg.norm(fromto[3:])
+
+            return [ratio * body_len]
 
     sysid_params = []
 
     # randomize the joint connecting me to my parent
     joints = body.findall("joint")
     assert len(joints) == 1, "must be kinematic chain"
-    damping_mul = rand_ratio(npr, JOINT_DAMPING_RATIO)
-    stiffness_mul = rand_ratio(npr, JOINT_STIFFNESS_RATIO)
-    range_add = list(npr.uniform(-JOINT_RANGE_ADD, JOINT_RANGE_ADD, size=(2)))
-    damping = fn_attr(joints[0], "damping", op.mul, damping_mul)
-    stiffness = fn_attr(joints[0], "stiffness", op.mul, stiffness_mul)
-    range = fn_attr(joints[0], "range", op.add, range_add)
-    sysid_params.extend([0.1 * damping[0]] + [0.01 * stiffness[0]] + range)
+    joint = joints[0]
+
+    # not all envs define these for all joints.
+    # TODO: find the <default> values and mutate those
+
+    try:
+        damping_mul = rand_ratio(npr, JOINT_DAMPING_RATIO)
+        damping = fn_attr(joint, "damping", op.mul, damping_mul)
+        sysid_params.extend([0.1 * damping[0]])
+    except KeyError:
+        pass
+
+    try:
+        stiffness_mul = rand_ratio(npr, JOINT_STIFFNESS_RATIO)
+        stiffness = fn_attr(joint, "stiffness", op.mul, stiffness_mul)
+        sysid_params.extend([0.01 * stiffness[0]])
+    except KeyError:
+        pass
+
+    # TODO: parse the compiler options instead of using this heuristic!!
+    range = parsevec(joint.attrib["range"])
+    is_degrees = np.any(np.abs(range) > 5.0)
+    delta = np.radians(JOINT_RANGE_ADD) if is_degrees else JOINT_RANGE_ADD
+    range_add = list(npr.uniform(-delta, delta, size=(2)))
+    range = fn_attr(joint, "range", op.add, range_add)
+    if is_degrees:
+        range = np.radians(range)
+    sysid_params.extend(range)
 
     # randomize my child
     geom = body.findall("geom")
