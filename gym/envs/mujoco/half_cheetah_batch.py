@@ -13,22 +13,12 @@ import operator as op
 
 xml_path = os.path.join(os.path.dirname(__file__), "assets", "half_cheetah.xml")
 
-
-RANDOMNESS = 1.5
-TORSO_LEN_RATIO = RANDOMNESS
-GEAR_RATIO = RANDOMNESS
-
-
-def mutate_cheetah_tree(np_random, tree):
-    npr = np_random
+def mutate_cheetah_tree(np_random, tree, randomness):
 
     torso = tree.find("worldbody/body")
     assert torso.attrib["name"] == "torso"
 
-    # TODO: randomize head? probably doesn't matter much,
-    # except it influcences succeptibility to flip-overs
-
-    lenscale = rand_ratio(npr, TORSO_LEN_RATIO)
+    lenscale = rand_ratio(np_random, randomness)
     torso_geom = named_child(torso, "geom", "torso")
     fn_attr(torso_geom, "fromto", op.mul, lenscale) # depending on being zero-centered
     head_geom = named_child(torso, "geom", "head")
@@ -40,17 +30,30 @@ def mutate_cheetah_tree(np_random, tree):
     for thigh_name in ("bthigh", "fthigh"):
         thigh = named_child(torso, "body", thigh_name)
         fn_attr(thigh, "pos", op.mul, lenscale)
-        sysid_params.extend(randomize_chain(np_random, thigh, RANDOMNESS))
+        sysid_params.extend(randomize_chain(np_random, thigh, randomness))
 
-    randomize_gear_ratios(npr, tree, GEAR_RATIO)
+    sysid_params.extend(randomize_gear_ratios(np_random, tree, randomness))
 
     return np.array(sysid_params)
 
 
 class HalfCheetahBatchEnv(MujocoBatchEnv):
 
-    def __init__(self, N=64):
-        total_envs = 256
+    # tweak: construct the envs with the normal amount of randomness
+    # using the same seed, but then slightly modify them
+    def __init__(self, n_batch, n_total, randomness, tweak=1.0):
+
+        print("1/2-cheetah with randomness", randomness)
+
+        def mutate(np_random, tree):
+            prng_state = np_random.get_state()
+            assert prng_state[0] == "MT19937"
+            #print("mutating w/ state",
+                #hash(prng_state[1].tostring() + bytes(prng_state[2])))
+            #print("randomness {}, tweak {}".format(randomness, tweak))
+            mutate_cheetah_tree(np_random, tree, randomness)
+            return mutate_cheetah_tree(np_random, tree, tweak)
+
         ep_len = 196
         super().__init__(HalfCheetahEnv, xml_path,
-            mutate_cheetah_tree, N, total_envs, ep_len)
+            mutate, n_batch, n_total, ep_len)
