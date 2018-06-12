@@ -44,7 +44,7 @@ class MujocoBatchEnv(gym.Env):
         # (we can't just sample with replacement because mujoco envs have reference semantics)
         def gen():
             while True:
-                self.np_random.seed(self.seed)
+                self.np_random.seed(self._my_seed)
                 yield from it.islice(
                     _generate_envs(self.np_random, EnvClass, xml_path, mutator),
                     self.N_RAND)
@@ -80,7 +80,7 @@ class MujocoBatchEnv(gym.Env):
 
     def _seed(self, seed=None):
         self.np_random, seed = gym.utils.seeding.np_random(seed)
-        self.seed = seed
+        self._my_seed = seed
         self._init_after_seed(*self.init_args)
         return [seed]
 
@@ -209,6 +209,7 @@ def randomize_chain(np_random, body, randomness):
     JOINT_RANGE_ADD = 0.3 * (randomness - 1.0)
     JOINT_STIFFNESS_RATIO = randomness
     JOINT_DAMPING_RATIO = randomness
+    RATIO_MIN = 0.25
 
     def rand_length_withchild(geom, child):
         assert geom.attrib["type"] == "capsule", "TODO: support other geom types"
@@ -223,7 +224,8 @@ def randomize_chain(np_random, body, randomness):
             #geom_len_delta = geom_size[1] - body_len
             geom_len_delta = 0
 
-            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            #ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
             geom_size[1] = ratio * 0.5 * body_len + geom_len_delta 
 
             geom.attrib["pos"] = formatvec(0.5 * cpos * ratio)
@@ -242,7 +244,8 @@ def randomize_chain(np_random, body, randomness):
             assert np.all(fromto[:3] == 0)
             assert np.all(fromto[3:] == cpos)
 
-            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            #ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
 
             geom.attrib["fromto"] = formatvec(ratio * fromto)
             child.attrib["pos"] = formatvec(ratio * cpos)
@@ -253,13 +256,22 @@ def randomize_chain(np_random, body, randomness):
 
 
     def rand_length_end(geom):
-        assert geom.attrib["type"] == "capsule", "TODO: support other geom types"
+
+        g_type = geom.attrib["type"]
+
+        # special case for reacher fingertip. we could change radius 
+        if g_type == "sphere":
+            assert geom.attrib["name"] == "fingertip"
+            return []
+
+        assert g_type == "capsule", "TODO: support other geom types"
 
         assert not ("axisangle" in geom.attrib and "fromto" in geom.attrib)
 
         if "axisangle" in geom.attrib:
 
-            scale = rand_ratio(npr, JOINT_LEN_RATIO)
+            #scale = rand_ratio(npr, JOINT_LEN_RATIO)
+            scale = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
             fn_attr(geom, "pos", op.mul, scale)
             geom_size = parsevec(geom.attrib["size"])
             fn_attr(geom, "size", op.mul, [1, scale])
@@ -272,7 +284,8 @@ def randomize_chain(np_random, body, randomness):
                 print("invalid fromto:", fromto)
             assert np.all(fromto[:3] == 0)
 
-            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            #ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
             geom.attrib["fromto"] = formatvec(ratio * fromto)
             body_len = np.linalg.norm(fromto[3:])
 
@@ -282,35 +295,42 @@ def randomize_chain(np_random, body, randomness):
 
     # randomize the joint connecting me to my parent
     joints = body.findall("joint")
-    assert len(joints) == 1, "must be kinematic chain"
-    joint = joints[0]
+    assert len(joints) < 2, "must be kinematic chain"
 
-    # not all envs define these for all joints.
-    # TODO: find the <default> values and mutate those
+    if len(joints) == 1:
+        joint = joints[0]
 
-    try:
-        damping_mul = rand_ratio(npr, JOINT_DAMPING_RATIO)
-        damping = fn_attr(joint, "damping", op.mul, damping_mul)
-        sysid_params.extend([0.1 * damping[0]])
-    except KeyError:
+        # not all envs define these for all joints.
+        # TODO: find the <default> values and mutate those
+
+        try:
+            damping_mul = rand_ratio(npr, JOINT_DAMPING_RATIO)
+            damping = fn_attr(joint, "damping", op.mul, damping_mul)
+            sysid_params.extend([0.1 * damping[0]])
+        except KeyError:
+            pass
+
+        try:
+            stiffness_mul = rand_ratio(npr, JOINT_STIFFNESS_RATIO)
+            stiffness = fn_attr(joint, "stiffness", op.mul, stiffness_mul)
+            sysid_params.extend([0.01 * stiffness[0]])
+        except KeyError:
+            pass
+
+        try:
+            range = parsevec(joint.attrib["range"])
+            is_degrees = np.any(np.abs(range) > 5.0)
+            delta = np.radians(JOINT_RANGE_ADD) if is_degrees else JOINT_RANGE_ADD
+            range_add = list(npr.uniform(-delta, delta, size=(2)))
+            range = fn_attr(joint, "range", op.add, range_add)
+            if is_degrees:
+                range = np.radians(range)
+            sysid_params.extend(range)
+        except KeyError:
+            pass
+    else:
+        # rigid connection, e.g. reacher fingertip, do nothing
         pass
-
-    try:
-        stiffness_mul = rand_ratio(npr, JOINT_STIFFNESS_RATIO)
-        stiffness = fn_attr(joint, "stiffness", op.mul, stiffness_mul)
-        sysid_params.extend([0.01 * stiffness[0]])
-    except KeyError:
-        pass
-
-    # TODO: parse the compiler options instead of using this heuristic!!
-    range = parsevec(joint.attrib["range"])
-    is_degrees = np.any(np.abs(range) > 5.0)
-    delta = np.radians(JOINT_RANGE_ADD) if is_degrees else JOINT_RANGE_ADD
-    range_add = list(npr.uniform(-delta, delta, size=(2)))
-    range = fn_attr(joint, "range", op.add, range_add)
-    if is_degrees:
-        range = np.radians(range)
-    sysid_params.extend(range)
 
     # randomize my child
     geom = body.findall("geom")
