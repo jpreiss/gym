@@ -268,6 +268,16 @@ register(
 )
 
 register(
+    id='Shuffleboard-v0',
+    entry_point='gym.envs.mujoco:ShuffleboardEnv',
+)
+
+register(
+    id='Shuffleboard-Batch-v0',
+    entry_point='gym.envs.mujoco:ShuffleboardBatchEnv',
+)
+
+register(
     id='Thrower-v0',
     entry_point='gym.envs.mujoco:ThrowerEnv',
     max_episode_steps=100,
@@ -279,6 +289,11 @@ register(
     entry_point='gym.envs.mujoco:StrikerEnv',
     max_episode_steps=100,
     reward_threshold=0.0,
+)
+
+register(
+    id='Striker-Batch-v0',
+    entry_point='gym.envs.mujoco:StrikerBatchEnv',
 )
 
 register(
