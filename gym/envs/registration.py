@@ -1,3 +1,4 @@
+from copy import deepcopy
 import logging
 import pkg_resources
 import re
@@ -77,7 +78,7 @@ class EnvSpec(object):
         self._local_only = local_only
         self._kwargs = {} if kwargs is None else kwargs
 
-    def make(self):
+    def make(self, **kwargs):
         """Instantiates an instance of the environment with appropriate kwargs"""
         if self._entry_point is None:
             raise error.Error('Attempting to make deprecated env {}. (HINT: is there a newer registered version of this env?)'.format(self.id))
@@ -86,7 +87,9 @@ class EnvSpec(object):
             env = self._entry_point()
         else:
             cls = load(self._entry_point)
-            env = cls(**self._kwargs)
+            kw = deepcopy(self._kwargs)
+            kw.update(kwargs)
+            env = cls(**kw)
 
         # Make the enviroment aware of which spec it came from.
         env.unwrapped._spec = self
