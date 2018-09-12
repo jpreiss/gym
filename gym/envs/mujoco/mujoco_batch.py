@@ -48,7 +48,8 @@ class MujocoBatchEnv(gym.Env):
                 yield from it.islice(
                     _generate_envs(self.np_random, EnvClass, xml_path, mutator),
                     self.N_RAND)
-
+        #import pdb
+        #pdb.set_trace()
         n_envs = max(self.N, self.N_RAND)
         envs_all, sysids_all = zip(*list(it.islice(gen(), n_envs)))
 
@@ -57,8 +58,8 @@ class MujocoBatchEnv(gym.Env):
         self.envs_all = np.array(envs_all)
         self.sysids_all = np.row_stack(sysids_all)
         s = self.sysids_all.flatten()
-        print("sysid params: max {}, min {}, mean {}, std {}".format(
-            np.amax(s), np.amin(s), np.mean(s), np.std(s)))
+        #print("sysid params: max {}, min {}, mean {}, std {}".format(
+            #np.amax(s), np.amin(s), np.mean(s), np.std(s)))
 
         env0 = self.envs_all[0]
         self.obs_dim = env0.observation_space.low.shape
@@ -224,8 +225,8 @@ def randomize_chain(np_random, body, randomness):
             #geom_len_delta = geom_size[1] - body_len
             geom_len_delta = 0
 
-            #ratio = rand_ratio(npr, JOINT_LEN_RATIO)
-            ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
+            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            #ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
             geom_size[1] = ratio * 0.5 * body_len + geom_len_delta 
 
             geom.attrib["pos"] = formatvec(0.5 * cpos * ratio)
@@ -244,8 +245,8 @@ def randomize_chain(np_random, body, randomness):
             assert np.all(fromto[:3] == 0)
             assert np.all(fromto[3:] == cpos)
 
-            #ratio = rand_ratio(npr, JOINT_LEN_RATIO)
-            ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
+            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            #ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
 
             geom.attrib["fromto"] = formatvec(ratio * fromto)
             child.attrib["pos"] = formatvec(ratio * cpos)
@@ -270,8 +271,8 @@ def randomize_chain(np_random, body, randomness):
 
         if "axisangle" in geom.attrib:
 
-            #scale = rand_ratio(npr, JOINT_LEN_RATIO)
-            scale = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
+            scale = rand_ratio(npr, JOINT_LEN_RATIO)
+            #scale = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
             fn_attr(geom, "pos", op.mul, scale)
             geom_size = parsevec(geom.attrib["size"])
             fn_attr(geom, "size", op.mul, [1, scale])
@@ -284,8 +285,8 @@ def randomize_chain(np_random, body, randomness):
                 print("invalid fromto:", fromto)
             assert np.all(fromto[:3] == 0)
 
-            #ratio = rand_ratio(npr, JOINT_LEN_RATIO)
-            ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
+            ratio = rand_ratio(npr, JOINT_LEN_RATIO)
+            #ratio = npr.uniform(RATIO_MIN, JOINT_LEN_RATIO)
             geom.attrib["fromto"] = formatvec(ratio * fromto)
             body_len = np.linalg.norm(fromto[3:])
 
@@ -348,10 +349,18 @@ def randomize_chain(np_random, body, randomness):
     return sysid_params
 
 
-def randomize_gear_ratios(np_random, tree, ratio):
+def randomize_gear_ratios(np_random, tree, ratio, disable=False):
     ac = tree.find("actuator")
     sysid_params = []
-    for motor in ac.findall("motor"):
-        gear_ratio = fn_attr(motor, "gear", op.mul, rand_ratio(np_random, ratio))
+    motors = ac.findall("motor")
+    # with 50% chance, disable exactly one motor
+    ind_disabled = np_random.randint(len(motors))
+    if not disable or np_random.uniform() > 0.5:
+        ind_disabled = -1
+    for i, motor in enumerate(motors):
+        if i == ind_disabled:
+            gear_ratio = fn_attr(motor, "gear", op.mul, 0.0)
+        else:
+            gear_ratio = fn_attr(motor, "gear", op.mul, rand_ratio(np_random, ratio))
         sysid_params.append(0.01 * gear_ratio[0]) # keep all sysid params near N(0,1)
     return sysid_params
