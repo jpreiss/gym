@@ -1,13 +1,12 @@
-import gym
-from gym import utils
-
-import numpy as np
-
 from copy import deepcopy
 import itertools as it
 import operator as op
 import tempfile
 import xml.etree.cElementTree as ElementTree
+
+import gym
+from gym import utils
+import numpy as np
 
 
 class MujocoBatchEnv(gym.Env):
@@ -27,39 +26,35 @@ class MujocoBatchEnv(gym.Env):
     # mutator: function that modifies an ElementTree xml tree in place
     #          and returns a 1D NumPy ndarray of the SysID params.
     # n_parallel: number of environments to execute at same time (using batch-Gym)
-    # n_total: total number of random environments to construct.
-    #          at each iteration, a random choice of n_parallel is drawn.
+    # seeds: list of seeds for sub-environments.
     # ep_len: episode length. EnvClass should not end episodes on its own.
     #
-    def _init_after_seed(self, EnvClass, xml_path, mutator, n_parallel, n_total, ep_len):
-        self.N = n_parallel
-        self.N_RAND = n_total
-        self.mean_rews = np.zeros(n_total)
+    def _init_after_seed(self, EnvClass, xml_path, mutator, n_parallel, seeds, ep_len):
 
-        self.tick = 0
+        #print("mujoco_batch ctor with seeds:")
+        #print(seeds)
+
+        self.N = n_parallel
+        self.seeds = seeds
         self.ep_len = ep_len
+        self.np_random = np.random.RandomState(self.seeds[0])
 
         # construct a bunch of randomized models
-        # little complicated to deal with N_RAND < N case
-        # (we can't just sample with replacement because mujoco envs have reference semantics)
-        def gen():
+        # little complicated to deal with N_RAND < N case,
+        # where we need to construct multiple copies of the
+        # we can't just sample with replacement because mujoco envs have reference semantics
+        def env_repeater():
             while True:
-                self.np_random.seed(self._my_seed)
-                yield from it.islice(
-                    _generate_envs(self.np_random, EnvClass, xml_path, mutator),
-                    self.N_RAND)
-        #import pdb
-        #pdb.set_trace()
-        n_envs = max(self.N, self.N_RAND)
-        envs_all, sysids_all = zip(*list(it.islice(gen(), n_envs)))
+                yield from _generate_envs(seeds, EnvClass, xml_path, mutator)
+        n_envs = max(self.N, len(seeds))
+        envs_all, sysids_all = zip(*list(it.islice(env_repeater(), n_envs)))
+        unique_ids = set(id(env) for env in envs_all)
+        assert len(unique_ids) == n_envs
+        self.envs_all = np.array(envs_all)
 
         assert len(sysids_all[0].shape) == 1
         self.sysid_dim = sysids_all[0].shape[0]
-        self.envs_all = np.array(envs_all)
         self.sysids_all = np.row_stack(sysids_all)
-        s = self.sysids_all.flatten()
-        #print("sysid params: max {}, min {}, mean {}, std {}".format(
-            #np.amax(s), np.amin(s), np.mean(s), np.std(s)))
 
         env0 = self.envs_all[0]
         self.obs_dim = env0.observation_space.low.shape
@@ -73,17 +68,17 @@ class MujocoBatchEnv(gym.Env):
 
         self.observation_space = expand_obs_by(
             env0.observation_space, self.sysid_dim)
+
         self.envs = None
         self.sample_sysid()
+        self.tick = 0
 
         # rendering stuff
         self.metadata = deepcopy(env0.metadata)
 
-    def _seed(self, seed=None):
-        self.np_random, seed = gym.utils.seeding.np_random(seed)
-        self._my_seed = seed
+    def seed(self, *args):
         self._init_after_seed(*self.init_args)
-        return [seed]
+        return self.seeds
 
     def sample_sysid(self):
         prev_env0 = None
@@ -97,8 +92,10 @@ class MujocoBatchEnv(gym.Env):
         if prev_env0 is not None and prev_env0.viewer is not None:
             self.envs[0]._take_viewer(prev_env0)
 
+
     def sysid_values(self):
         return deepcopy(self.sysid)
+
 
     def _step(self, a):
         obs = np.zeros([self.N] + list(self.obs_dim))
@@ -108,13 +105,6 @@ class MujocoBatchEnv(gym.Env):
             ob, reward, done, rew_dict = self.envs[i]._step(a[i,:])
             obs[i] = ob
             rewards[i] = reward
-
-        if False:
-            beta = 0.9995
-            self.mean_rews[self.selection] = (
-                beta * self.mean_rews[self.selection] +
-                (1.0 - beta) * rewards)
-            rewards -= self.mean_rews[self.selection]
 
         self.tick += 1
         done = self.tick >= self.ep_len
@@ -128,13 +118,16 @@ class MujocoBatchEnv(gym.Env):
 
         return obs, rewards, dones, None
 
+
     def _render(self, mode='human', close=False):
         self.envs[0].render(mode=mode, close=close)
+
 
     def _reset(self):
         for env in self.envs:
             env.reset()
         return self._get_obs()
+
 
     def _get_obs(self):
         obs = np.zeros([self.N] + list(self.obs_dim))
@@ -143,20 +136,21 @@ class MujocoBatchEnv(gym.Env):
         return np.concatenate([obs, self.sysid], 1)
 
 
-def _generate_envs(npr, EnvClass, xml_path, mutator):
+def _generate_envs(seeds, EnvClass, xml_path, mutator):
 
     tree = ElementTree.parse(xml_path)
-    while True:
+    for seed in seeds:
+        # print("generating mujoco_batch sub-env with seed", seed)
         treecopy = deepcopy(tree)
-        sysid_vec = mutator(npr, treecopy)
+        npr_gen = np.random.RandomState(seed)
+        sysid_vec = mutator(npr_gen, treecopy)
 
         tf = tempfile.NamedTemporaryFile(delete=True)
         write_path = tf.name
         treecopy.write(write_path)
 
         env = EnvClass(model_path=write_path)
-        s = npr.randint(100000)
-        env.seed(s)
+        env.seed(seed)
         yield env, sysid_vec
 
 

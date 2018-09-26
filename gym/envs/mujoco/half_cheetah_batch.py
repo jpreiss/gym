@@ -47,7 +47,7 @@ class HalfCheetahBatchEnv(MujocoBatchEnv):
 
     # tweak: construct the envs with the normal amount of randomness
     # using the same seed, but then slightly modify them
-    def __init__(self, n_batch, n_total, randomness, ep_len, tweak=1.0):
+    def __init__(self, n_batch, seeds, randomness, ep_len, tweak=1.0):
 
         #print("1/2-cheetah with randomness", randomness)
 
@@ -64,4 +64,4 @@ class HalfCheetahBatchEnv(MujocoBatchEnv):
             return sysid
 
         super().__init__(HalfCheetahEnv, xml_path,
-            mutate, n_batch, n_total, ep_len)
+            mutate, n_batch, seeds, ep_len)
